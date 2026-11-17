@@ -67,12 +67,20 @@ int main() {
 
     // --- License key ---
     printf("License key: ");
-    char key_buf[128]{};
+    char key_buf[256]{};
     if (!fgets(key_buf, sizeof(key_buf), stdin)) {
         printf("Failed to read license key\n");
         return 1;
     }
     size_t klen = strlen(key_buf);
+    // Detect silent truncation: a complete line always ends with '\n'
+    // (or EOF right after the key); without one, the buffer was full.
+    if (klen == sizeof(key_buf) - 1 && key_buf[klen - 1] != '\n') {
+        printf("License key too long (max %zu chars)\n", sizeof(key_buf) - 2);
+        volatile char* kb0 = key_buf;
+        for (size_t i = 0; i < sizeof(key_buf); ++i) kb0[i] = 0;
+        return 1;
+    }
     while (klen > 0 && (key_buf[klen - 1] == '\n' || key_buf[klen - 1] == '\r'))
         key_buf[--klen] = 0;
 

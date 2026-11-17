@@ -7,6 +7,7 @@
 #include "json_lite.h"
 
 #include <Windows.h>
+#include <atomic>
 #include <ctime>
 #include <string>
 #include <cstring>
@@ -29,8 +30,8 @@ static uint8_t     s_key[32]{};
 static std::string s_token;
 static std::string s_nonce;
 static int         s_interval   = 60;
-static volatile bool s_running  = false;
-static stop_reason s_reason     = stop_reason::requested;
+static std::atomic<bool>        s_running{false};
+static std::atomic<stop_reason> s_reason{stop_reason::requested};
 
 static fn_CreateEventA  pCreateEvent;
 static fn_SetEvent      pSetEvent;
@@ -55,7 +56,7 @@ static DWORD WINAPI thread_proc(LPVOID) {
                 reinterpret_cast<const uint8_t*>(ts.data()), ts.size(),
                 hmac))
         {
-            if (++fails >= 3) { s_reason = stop_reason::failed; break; }
+            if (++fails >= 3) { s_reason.store(stop_reason::failed, std::memory_order_release); break; }
             continue;
         }
 
@@ -78,16 +79,16 @@ static DWORD WINAPI thread_proc(LPVOID) {
             if (!next.empty()) s_nonce = next;
 
             if (json::get_bool(resp.body, "kill")) {
-                s_reason = stop_reason::killed;
+                s_reason.store(stop_reason::killed, std::memory_order_release);
                 break;
             }
             if (json::get_bool(resp.body, "revoked")) {
-                s_reason = stop_reason::revoked;
+                s_reason.store(stop_reason::revoked, std::memory_order_release);
                 break;
             }
         } else {
             if (++fails >= 3) {
-                s_reason = stop_reason::failed;
+                s_reason.store(stop_reason::failed, std::memory_order_release);
                 break;
             }
         }
@@ -97,7 +98,7 @@ static DWORD WINAPI thread_proc(LPVOID) {
     volatile uint8_t* p = s_key;
     for (int i = 0; i < 32; ++i) p[i] = 0;
 
-    s_running = false;
+    s_running.store(false, std::memory_order_release);
     return 0;
 }
 
@@ -106,7 +107,7 @@ static DWORD WINAPI thread_proc(LPVOID) {
 bool start(const char* session_token, const uint8_t* session_key,
            int interval_seconds, const char* initial_nonce_b64)
 {
-    if (s_running) return false;
+    if (s_running.load(std::memory_order_acquire)) return false;
 
     auto k32 = dynapi::get_module(dynapi::modules::KERNEL32);
     if (!k32) return false;
@@ -124,15 +125,15 @@ bool start(const char* session_token, const uint8_t* session_key,
     memcpy(s_key, session_key, 32);
     s_interval = interval_seconds;
     s_nonce    = initial_nonce_b64;
-    s_reason   = stop_reason::requested;
+    s_reason.store(stop_reason::requested, std::memory_order_release);
 
     s_stop_event = pCreateEvent(nullptr, TRUE, FALSE, nullptr);
     if (!s_stop_event) return false;
 
-    s_running = true;
+    s_running.store(true, std::memory_order_release);
     s_thread  = pCreateThread(nullptr, 0, thread_proc, nullptr, 0, nullptr);
     if (!s_thread) {
-        s_running = false;
+        s_running.store(false, std::memory_order_release);
         pCloseHandle(s_stop_event);
         s_stop_event = nullptr;
         return false;
@@ -159,7 +160,7 @@ void stop() {
     }
     pCloseHandle(s_stop_event);
     s_stop_event = nullptr;
-    s_running = false;
+    s_running.store(false, std::memory_order_release);
 
     // Scrub session data
     s_token.clear();
@@ -168,7 +169,7 @@ void stop() {
     for (int i = 0; i < 32; ++i) p[i] = 0;
 }
 
-bool is_running()         { return s_running; }
-stop_reason get_stop_reason() { return s_reason; }
+bool is_running()         { return s_running.load(std::memory_order_acquire); }
+stop_reason get_stop_reason() { return s_reason.load(std::memory_order_acquire); }
 
 } // namespace heartbeat

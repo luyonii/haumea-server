@@ -284,32 +284,15 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 5) HWID bind + cooldown
-	curBind, err := s.PG.HWIDBind(ctx, lic.ID)
-	switch {
-	case errors.Is(err, store.ErrNotFound):
-		if err := s.PG.HWIDUpsertBind(ctx, lic.ID, req.HWID); err != nil {
-			writeErr(w, http.StatusInternalServerError, "server_error", "bind")
-			return
-		}
-	case err != nil:
-		writeErr(w, http.StatusInternalServerError, "server_error", "bind read")
-		return
-	case curBind != req.HWID:
-		last, err := s.PG.HWIDLastChange(ctx, lic.ID)
-		if err != nil {
-			writeErr(w, http.StatusInternalServerError, "server_error", "cooldown read")
-			return
-		}
-		if !last.IsZero() && time.Since(last) < s.Cfg.HWIDCooldown {
+	// 5) HWID bind + cooldown (atomic: see store.HWIDBindIfAllowed)
+	if err := s.PG.HWIDBindIfAllowed(ctx, lic.ID, req.HWID, s.Cfg.HWIDCooldown); err != nil {
+		if errors.Is(err, store.ErrHWIDCooldown) {
 			s.PG.LogAbuse(ctx, &lic.ID, ip, "hwid_cooldown")
 			writeErr(w, http.StatusUnauthorized, "hwid_cooldown", "hwid change within cooldown")
 			return
 		}
-		if err := s.PG.HWIDUpsertBind(ctx, lic.ID, req.HWID); err != nil {
-			writeErr(w, http.StatusInternalServerError, "server_error", "rebind")
-			return
-		}
+		writeErr(w, http.StatusInternalServerError, "server_error", "bind")
+		return
 	}
 
 	// 6) Kill previous session for this license.
@@ -665,6 +648,24 @@ func (s *Server) handleRPC(w http.ResponseWriter, r *http.Request) {
 	got, err := base64.StdEncoding.DecodeString(req.HMAC)
 	if err != nil || !crypto.Equal(got, expected) {
 		metricInc("hmac_fail_total", "/rpc/call")
+		writeErr(w, http.StatusUnauthorized, "invalid_hmac", "")
+		return
+	}
+
+	// Anti-replay: timestamp is unique per (session, second); SET NX burns it.
+	tokPfx := req.Token
+	if len(tokPfx) > 8 {
+		tokPfx = tokPfx[:8]
+	}
+	nonceKey := "rpc_nonce:" + tokPfx + ":" + req.Timestamp
+	ok, err := s.RDB.TrySetOnce(ctx, nonceKey, 2*s.Cfg.TimestampSkew)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "server_error", "redis")
+		return
+	}
+	if !ok {
+		metricInc("rpc_replay_blocked", "/rpc/call")
+		log.Printf("rpc replay blocked token_pfx=%s ts=%s ip=%s", tokPfx, req.Timestamp, clientIP(r))
 		writeErr(w, http.StatusUnauthorized, "invalid_hmac", "")
 		return
 	}

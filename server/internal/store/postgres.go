@@ -12,6 +12,9 @@ import (
 // ErrNotFound is returned when a license or payload does not exist.
 var ErrNotFound = errors.New("not found")
 
+// ErrHWIDCooldown is returned by HWIDBindIfAllowed when a rebind is blocked by the cooldown window.
+var ErrHWIDCooldown = errors.New("hwid cooldown")
+
 type License struct {
 	ID     int64
 	Key    string
@@ -44,37 +47,48 @@ func (p *PG) LicenseByKey(ctx context.Context, key string) (*License, error) {
 	return &l, nil
 }
 
-// HWIDBind returns the current bound hwid for the license, or ErrNotFound.
-func (p *PG) HWIDBind(ctx context.Context, licenseID int64) (string, error) {
-	var h string
-	err := p.Pool.QueryRow(ctx,
-		`SELECT hwid FROM hwid_binds WHERE license_id = $1`, licenseID,
-	).Scan(&h)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return "", ErrNotFound
-	}
-	return h, err
-}
-
-// HWIDLastChange returns the last_change timestamp for the cooldown row, or zero.
-func (p *PG) HWIDLastChange(ctx context.Context, licenseID int64) (time.Time, error) {
-	var t time.Time
-	err := p.Pool.QueryRow(ctx,
-		`SELECT last_change FROM hwid_cooldown WHERE license_id = $1`, licenseID,
-	).Scan(&t)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return time.Time{}, nil
-	}
-	return t, err
-}
-
-// HWIDUpsertBind inserts or replaces the bind row and sets cooldown.last_change = now().
-func (p *PG) HWIDUpsertBind(ctx context.Context, licenseID int64, hwid string) error {
+// HWIDBindIfAllowed atomically binds hwid to licenseID under the cooldown rule:
+// if a different hwid is already bound and last_change < cooldown, returns ErrHWIDCooldown;
+// same hwid is a no-op. Concurrent callers for the same license serialize on the
+// licenses row (SELECT ... FOR UPDATE), so the read-check-write is a single critical section.
+func (p *PG) HWIDBindIfAllowed(ctx context.Context, licenseID int64, hwid string, cooldown time.Duration) error {
 	tx, err := p.Pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
+
+	var one int
+	if err := tx.QueryRow(ctx,
+		`SELECT 1 FROM licenses WHERE id = $1 FOR UPDATE`, licenseID,
+	).Scan(&one); err != nil {
+		return err
+	}
+
+	var cur string
+	err = tx.QueryRow(ctx,
+		`SELECT hwid FROM hwid_binds WHERE license_id = $1`, licenseID,
+	).Scan(&cur)
+	hasBind := err == nil
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+	if hasBind && cur == hwid {
+		return tx.Commit(ctx)
+	}
+	if hasBind {
+		var last time.Time
+		err = tx.QueryRow(ctx,
+			`SELECT last_change FROM hwid_cooldown WHERE license_id = $1`, licenseID,
+		).Scan(&last)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return err
+		}
+		if err == nil && time.Since(last) < cooldown {
+			return ErrHWIDCooldown
+		}
+	}
+
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO hwid_binds (license_id, hwid) VALUES ($1, $2)
 		 ON CONFLICT (license_id) DO UPDATE SET hwid = EXCLUDED.hwid, bound_at = now()`,

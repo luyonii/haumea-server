@@ -92,6 +92,12 @@ func (r *Redis) DeleteSession(ctx context.Context, token string) {
 	_ = r.C.Del(ctx, "session:"+token).Err()
 }
 
+// TrySetOnce is SET key 1 NX EX ttl: returns true iff key did not exist.
+// Used as a one-shot anti-replay guard.
+func (r *Redis) TrySetOnce(ctx context.Context, key string, ttl time.Duration) (bool, error) {
+	return r.C.SetNX(ctx, key, 1, ttl).Result()
+}
+
 // ---- Rate limit ----
 
 // Allow returns true if the per-minute counter under key is under limit. Fixed window.

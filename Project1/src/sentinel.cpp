@@ -9,6 +9,7 @@
 #include "dynapi.h"
 
 #include <Windows.h>
+#include <atomic>
 
 namespace sentinel {
 
@@ -24,7 +25,7 @@ static HANDLE   s_thread         = nullptr;
 static HANDLE   s_stop_event     = nullptr;
 static uint32_t s_baseline       = 0;
 static uint32_t s_code_baseline  = 0;
-static volatile bool s_running = false;
+static std::atomic<bool> s_running{false};
 static scrub_cb s_scrub_cb = nullptr;
 
 void set_scrub_callback(scrub_cb cb) { s_scrub_cb = cb; }
@@ -57,7 +58,7 @@ static DWORD WINAPI monitor_proc(LPVOID) {
     auto k32 = dynapi::get_module(dynapi::modules::KERNEL32);
     auto pWait = reinterpret_cast<fn_WaitForSingle>(
         dynapi::resolve(k32, API_HASH("WaitForSingleObject")));
-    if (!pWait) { s_running = false; return 0; }
+    if (!pWait) { s_running.store(false, std::memory_order_release); return 0; }
 
     while (true) {
         DWORD w = pWait(s_stop_event, 30000);
@@ -78,12 +79,12 @@ static DWORD WINAPI monitor_proc(LPVOID) {
             break;
         }
     }
-    s_running = false;
+    s_running.store(false, std::memory_order_release);
     return 0;
 }
 
 bool start_monitor(uint32_t text_crc_baseline, uint32_t code_canary_baseline) {
-    if (s_running) return false;
+    if (s_running.load(std::memory_order_acquire)) return false;
 
     auto k32 = dynapi::get_module(dynapi::modules::KERNEL32);
     auto pCE = reinterpret_cast<fn_CreateEventA>(
@@ -97,9 +98,9 @@ bool start_monitor(uint32_t text_crc_baseline, uint32_t code_canary_baseline) {
     s_stop_event = pCE(nullptr, TRUE, FALSE, nullptr);
     if (!s_stop_event) return false;
 
-    s_running = true;
+    s_running.store(true, std::memory_order_release);
     s_thread  = pCT(nullptr, 0, monitor_proc, nullptr, 0, nullptr);
-    if (!s_thread) { s_running = false; return false; }
+    if (!s_thread) { s_running.store(false, std::memory_order_release); return false; }
     return true;
 }
 
@@ -122,7 +123,7 @@ void stop_monitor() {
     }
     if (pCH) pCH(s_stop_event);
     s_stop_event = nullptr;
-    s_running = false;
+    s_running.store(false, std::memory_order_release);
 }
 
 } // namespace sentinel
