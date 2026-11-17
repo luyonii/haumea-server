@@ -1,0 +1,23 @@
+# Binaries
+/server
+/server.exe
+*.exe
+
+# Test and coverage
+*.test
+*.out
+coverage.*
+
+# Local config and secrets
+config.yaml
+*.pem
+*.key
+.env
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

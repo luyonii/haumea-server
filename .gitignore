@@ -1,0 +1,56 @@
+# --- VS / MSVC ---
+[Bb]in/
+[Oo]bj/
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+build/
+intermediates/
+*.user
+*.suo
+*.sdf
+*.opensdf
+*.VC.db
+*.VC.opendb
+*.aps
+*.ilk
+*.pdb
+*.iobj
+*.ipdb
+*.tlog
+*.recipe
+*.obj
+*.exp
+*.lib
+*.exe
+*.dll
+*.log
+.vs/
+
+# --- Go server ---
+server/config.yaml
+server/*.exe
+coverage.*
+
+# --- Secrets / certs / keys ---
+*.pem
+*.key
+*.pfx
+*.p12
+integration/nginx/cert/
+
+# --- Payload binaries (built artifacts) ---
+integration/dummy_payload/payload.dll
+integration/dummy_payload/*.obj
+integration/dummy_payload/*.exp
+integration/dummy_payload/*.lib
+
+# --- Env / IDE ---
+.env
+.vscode/
+.idea/
+
+# --- OS ---
+Thumbs.db
+.DS_Store
