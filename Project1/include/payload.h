@@ -21,10 +21,12 @@ enum class result {
 
 // local_hwid: 64-char hex SHA-256 string (from hwid::generate()).
 // license_hash: 32-byte SHA-256 of the raw license key (watermark::sha256).
+// k_payload_aes decrypts the envelope; k_watermark verifies the session binding.
 result load_and_execute(const char* session_token,
-                        const uint8_t* session_key,  // 32 bytes
+                        const uint8_t* k_payload_aes, // 32 bytes
+                        const uint8_t* k_watermark,   // 32 bytes
                         const char*    local_hwid,
-                        const uint8_t* license_hash, // 32 bytes
+                        const uint8_t* license_hash,  // 32 bytes
                         bool is_dll);
 
 } // namespace payload

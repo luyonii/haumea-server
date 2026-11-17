@@ -1,6 +1,9 @@
 # Integration harness plan
 
-Goal: prove the C++ loader in `Project1\` talks byte-for-byte to the Go server in `server\` over TLS 1.3 with leaf-DER SHA-256 pinning, loads a dummy DLL payload, and the sentinel chain survives.
+Goal: end-to-end smoke test of the commercial license server + loader
+pair. Prove the C++ loader in `Project1\` talks byte-for-byte to the Go
+license server in `server\` over TLS 1.3 with leaf-DER SHA-256 pinning,
+loads a dummy licensed DLL, and the runtime integrity watchdog survives.
 
 ## Topology
 
@@ -18,7 +21,7 @@ loader.exe  --TLS1.3-->  nginx:443 (container)  --HTTP-->  host 127.0.0.1:8080 (
 
 1. `docker compose up -d postgres redis` — DB + cache up.
 2. Apply `server/migrations/0001_init.sql` via one-shot psql.
-3. `scripts/build_dummy_payload.ps1` — compile `dummy_payload/payload.c` → `payload.dll` (Developer PowerShell for VS 2026).
+3. `scripts/build_dummy_payload.ps1` — compile `dummy_payload/payload.c` → `payload.dll` (Developer PowerShell for VS 2026). Stands in for the vendor's commercial binary.
 4. `scripts/seed_license.ps1` — generate `TEST-...` key, insert into `licenses`, insert PE bytes into `payload_builds`.
 5. `scripts/gen_cert.ps1` — self-signed leaf for `secblind.local`, export DER + key, print SHA-256 hex.
 6. User patches `Project1\src\net.cpp` lines 161-162 (both pins = same hash, or one placeholder cleared) and `Project1\src\Main.cpp` line 103 host → `secblind.local`. Rebuild.
@@ -31,7 +34,7 @@ loader.exe  --TLS1.3-->  nginx:443 (container)  --HTTP-->  host 127.0.0.1:8080 (
 
 - Nginx vs. direct TLS in Go: Nginx keeps server untouched and matches the shipped README. Cost: one more container.
 - Self-signed vs. mkcert: self-signed is one PowerShell cmdlet, no extra install. Client pin doesn't care about trust chain.
-- Dummy PE = DLL with MessageBox: proves PE map + entrypoint; no network side effects.
+- Dummy licensed binary = DLL with MessageBox: proves PE map + entrypoint; no network side effects.
 
 ## What this harness does NOT do
 

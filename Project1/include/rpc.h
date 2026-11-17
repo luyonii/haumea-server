@@ -15,7 +15,9 @@ struct response {
 
 // POST /api/v1/rpc/call with:
 //   {"method":..,"session_token":..,"payload":<params_json>,"timestamp":..,"hmac":..}
-// hmac = base64(HMAC-SHA256(session_key,
+// session_key here MUST be the k_rpc sub-key (HKDF-Expand of the PRK), not the
+// raw session_key PRK — the server verifies with k_rpc.
+// hmac = base64(HMAC-SHA256(k_rpc,
 //                           method || "|" || session_token || "|" || timestamp || "|" || params_json))
 // params_json may be "" (treated as "{}"). Success body is NOT scrubbed; caller owns it.
 //

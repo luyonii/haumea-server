@@ -1,7 +1,9 @@
-# Server API Specification (Fase 2)
+# Commercial License Server API Specification (Fase 2)
 
 Base URL: `https://<host>/api/v1`  
 Transport: TLS 1.3 only.
+
+REST API para o servidor de licenciamento do produto comercial. Todos os endpoints servem o cliente first-party do fornecedor.
 
 ---
 
@@ -118,7 +120,7 @@ All base64 fields (`hmac`, `next_nonce`) use standard RFC 4648 padding
 }
 ```
 
-When `kill` is `true`, the client must terminate the payload and exit.
+When `kill` is `true`, the client must terminate the licensed binary and exit (remote disable / license revocation).
 When `revoked` is `true`, the session is no longer valid.
 
 ### Response 401
@@ -134,7 +136,11 @@ When `revoked` is `true`, the session is no longer valid.
 
 ## POST /payload/fetch
 
-Download the encrypted payload for the authenticated session.
+Download the encrypted licensed binary for the authenticated session. The
+response carries the vendor's legitimate commercial binary, encrypted so
+it is protected in transit and never written to disk on the user's
+machine — the same pattern used by commercial DRM SDKs and licensed
+enterprise clients.
 
 ### Request
 
@@ -154,21 +160,21 @@ ciphertext is decrypted with the `session_key` returned by `/auth/login`.
 {
     "iv": "<base64 12-byte IV>",
     "tag": "<base64 16-byte GCM auth tag>",
-    "ciphertext": "<base64 of AES-256-GCM encrypted (watermark || PE)>"
+    "ciphertext": "<base64 of AES-256-GCM encrypted (session_binding || PE)>"
 }
 ```
 
-**Plaintext layout.** The decrypted plaintext is a 128-byte **watermark**
-followed by the PE body. The client verifies the watermark binds the
-payload to this HWID + license before mapping the PE; a failed watermark
-aborts the load.
+**Plaintext layout.** The decrypted plaintext is a 128-byte **per-session
+integrity tag** (session binding) followed by the PE body. The client
+verifies the record binds the binary to this HWID + license before
+mapping the PE; a failed verification aborts the load.
 
 | Offset | Size | Field              | Notes |
 |--------|------|--------------------|-------|
 | 0      | 32   | `hwid_hash`        | SHA-256 of the client HWID string (64-char lowercase hex, UTF-8 bytes of the hex string). |
 | 32     | 32   | `license_hash`     | SHA-256 of the raw license key bytes. |
 | 64     | 8    | `issued_at_unix`   | u64 little-endian, server timestamp (seconds since epoch). |
-| 72     | 8    | `ttl_seconds`      | u64 little-endian. Must be `> 0`; a watermark with `ttl_seconds == 0` is rejected as expired. |
+| 72     | 8    | `ttl_seconds`      | u64 little-endian. Must be `> 0`; a record with `ttl_seconds == 0` is rejected as expired. |
 | 80     | 16   | `nonce`            | server-chosen random bytes. |
 | 96     | 32   | `signature`        | HMAC-SHA256(key = session_key, data = bytes[0..96]). |
 

@@ -111,14 +111,14 @@ static uint64_t now_unix() {
 
 result verify(
     const uint8_t* plaintext, size_t plaintext_len,
-    const uint8_t* session_key,
+    const uint8_t* watermark_key,
     const char*    local_hwid,
     const uint8_t* license_hash,
     const uint8_t** out_pe_ptr,
     size_t*        out_pe_size)
 {
     if (!plaintext || plaintext_len < SIZE) return result::bad_size;
-    if (!session_key || !local_hwid || !license_hash) return result::bad_size;
+    if (!watermark_key || !local_hwid || !license_hash) return result::bad_size;
 
     // 1) HWID: hex -> 32 bytes, constant-time compare with wm[0..32].
     uint8_t local_hwid_bytes[32]{};
@@ -150,9 +150,9 @@ result verify(
     if (deadline < issued_at) { scrub_hwid(); return result::expired; } // u64 overflow
     if (now > deadline)       { scrub_hwid(); return result::expired; }
 
-    // 4) Signature: HMAC-SHA256(session_key, wm[0..96]) == wm[96..128].
+    // 4) Signature: HMAC-SHA256(watermark_key, wm[0..96]) == wm[96..128].
     uint8_t sig[32]{};
-    if (!auth::hmac_sha256(session_key, 32, plaintext, 96, sig)) {
+    if (!auth::hmac_sha256(watermark_key, 32, plaintext, 96, sig)) {
         scrub_hwid();
         return result::bad_signature;
     }

@@ -5,38 +5,29 @@ import (
 	"testing"
 )
 
-// RFC 5869 Appendix A.1 — basic SHA-256 vector.
-// We only compare the first 32 bytes (L=42 expected, 32 is one block).
-func TestHKDF_RFC5869_A1_FirstBlock(t *testing.T) {
-	ikm, _ := hex.DecodeString("0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b")
-	salt, _ := hex.DecodeString("000102030405060708090a0b0c")
-	info, _ := hex.DecodeString("f0f1f2f3f4f5f6f7f8f9")
-	// Expected L=42 OKM: 3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865
-	want, _ := hex.DecodeString("3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf")
-
-	got, err := HKDF(ikm, salt, info, 32)
-	if err != nil {
-		t.Fatalf("HKDF: %v", err)
+// Fixed PRK (session_key) = bytes 0x00..0x1f. Expected sub-keys computed
+// independently (HMAC-SHA256(prk, info||0x01), single HKDF-Expand block).
+// The C++ client must derive these exact bytes for the same inputs.
+func TestHKDFExpandSubKeys(t *testing.T) {
+	prk := make([]byte, 32)
+	for i := range prk {
+		prk[i] = byte(i)
 	}
-	if !Equal(got, want) {
-		t.Fatalf("mismatch\n got=%x\nwant=%x", got, want)
+
+	cases := []struct {
+		name string
+		info string
+		want string
+	}{
+		{"k_payload_aes", "sb.v1.payload.aes256gcm", "4e8a23816873957d1c4a074b1a1371a1044cb791bea972df12e198beaaff61a3"},
+		{"k_heartbeat", "sb.v1.heartbeat.hmac", "265deb22d853f0a7cd0d793236944d653bbaa3cd92ba5591804d4eeecb6dfbc0"},
+		{"k_watermark", "sb.v1.watermark.hmac", "903e0bd2d1769e6a165fb042c1e19ff315c43801fedf3e4009503aba6f23e4a5"},
+		{"k_rpc", "sb.v1.rpc.hmac", "8ea36ae7b6b9bb5034f6445b723b83a0710f2f1b781127a3ee7bf0dfb5cf4793"},
 	}
-}
-
-// HMAC-SHA256 NIST test vector (RFC 4231 test case 1).
-func TestHMAC256_RFC4231_Case1(t *testing.T) {
-	key, _ := hex.DecodeString("0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b")
-	data := []byte("Hi There")
-	want, _ := hex.DecodeString("b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7")
-
-	got := HMAC256(key, data)
-	if !Equal(got, want) {
-		t.Fatalf("mismatch\n got=%x\nwant=%x", got, want)
-	}
-}
-
-func TestHKDFSalt_Literal(t *testing.T) {
-	if len(HKDFSalt) != 16 || string(HKDFSalt) != "SecBlind_HKDF_v1" {
-		t.Fatalf("bad salt literal: %q (%d B)", HKDFSalt, len(HKDFSalt))
+	for _, c := range cases {
+		got := hex.EncodeToString(HKDFExpand(prk, []byte(c.info), 32))
+		if got != c.want {
+			t.Errorf("%s: got %s want %s", c.name, got, c.want)
+		}
 	}
 }

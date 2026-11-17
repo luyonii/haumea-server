@@ -64,6 +64,8 @@ static void*   s_conn     = nullptr;
 static bool    s_ready    = false;
 
 static CRITICAL_SECTION s_cs;
+static CRITICAL_SECTION s_req_cs;        // guards s_req only (short critical section, safe to grab from another thread while s_cs is held)
+static void*            s_req = nullptr; // in-flight request handle, or nullptr
 
 static fn_HttpOpen       pOpen;
 static fn_HttpConnect    pConnect;
@@ -220,6 +222,7 @@ bool init(const char* server_host, uint16_t port) {
     if (!pInitCS || !pEnterCS || !pLeaveCS || !pDeleteCS) return false;
 
     pInitCS(&s_cs);
+    pInitCS(&s_req_cs);
 
     // Create session
     s_session = pOpen(nullptr, WHTTP_ACCESS_AUTO, nullptr, nullptr, 0);
@@ -243,6 +246,17 @@ bool init(const char* server_host, uint16_t port) {
     return s_ready;
 }
 
+// Closes s_req under s_req_cs, if set. Single-close guaranteed: whoever grabs
+// s_req_cs first calls pClose and nulls the pointer; the other caller is a
+// no-op. Used by both the worker thread (normal close) and cancel_in_flight.
+static void close_request_locked() {
+    pEnterCS(&s_req_cs);
+    void* h = s_req;
+    s_req = nullptr;
+    pLeaveCS(&s_req_cs);
+    if (h) pClose(h);
+}
+
 response post(const char* path, const std::string& json_body) {
     response resp{};
     if (!s_ready) return resp;
@@ -262,6 +276,11 @@ response post(const char* path, const std::string& json_body) {
         return resp;
     }
 
+    // Publish handle so cancel_in_flight() can close it from another thread.
+    pEnterCS(&s_req_cs);
+    s_req = hReq;
+    pLeaveCS(&s_req_cs);
+
     // Content-Type header
     auto ct_n = OBF("Content-Type: application/json\r\n");
     wchar_t ct_w[64]{};
@@ -274,14 +293,14 @@ response post(const char* path, const std::string& json_body) {
                         body_ptr, body_len, body_len, 0);
 
     if (!ok || !pRecvResp(hReq, nullptr)) {
-        pClose(hReq);
+        close_request_locked();
         pLeaveCS(&s_cs);
         return resp;
     }
 
     // Certificate pinning — verify leaf cert after TLS handshake
     if (!verify_cert_pin(hReq)) {
-        pClose(hReq);
+        close_request_locked();
         pLeaveCS(&s_cs);
         return resp;   // status_code stays 0, caller sees pin failure
     }
@@ -306,15 +325,27 @@ response post(const char* path, const std::string& json_body) {
         }
     }
 
-    pClose(hReq);
+    close_request_locked();
     pLeaveCS(&s_cs);
     return resp;
 }
 
+void cancel_in_flight() {
+    if (!s_ready) return;
+    close_request_locked();
+}
+
 void shutdown() {
     if (!s_ready) return;
+    // If a request is still in flight the worker thread may still touch
+    // s_conn / s_session / s_req_cs. Skip teardown — OS reclaims on exit.
+    pEnterCS(&s_req_cs);
+    bool in_flight = (s_req != nullptr);
+    pLeaveCS(&s_req_cs);
+    if (in_flight) { s_ready = false; return; }
     if (s_conn)    { pClose(s_conn);    s_conn    = nullptr; }
     if (s_session) { pClose(s_session); s_session = nullptr; }
+    pDeleteCS(&s_req_cs);
     pDeleteCS(&s_cs);
     s_ready = false;
 }

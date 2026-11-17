@@ -21,12 +21,13 @@ static void scrub(std::vector<uint8_t>& v) {
 }
 
 result load_and_execute(const char* session_token,
-                        const uint8_t* session_key,
+                        const uint8_t* k_payload_aes,
+                        const uint8_t* k_watermark,
                         const char*    local_hwid,
                         const uint8_t* license_hash,
                         bool is_dll)
 {
-    if (!session_token || !session_key || !local_hwid || !license_hash)
+    if (!session_token || !k_payload_aes || !k_watermark || !local_hwid || !license_hash)
         return result::fetch_failed;
 
     auto body = json::object({{OBF("session_token").c_str(), session_token}});
@@ -76,7 +77,7 @@ result load_and_execute(const char* session_token,
 
     std::vector<uint8_t> pe_bytes;
     bool dec_ok = crypto::aes256_gcm_decrypt(
-        session_key,
+        k_payload_aes,
         iv.data(),  iv.size(),
         tag.data(), tag.size(),
         ct.data(),  ct.size(),
@@ -93,7 +94,7 @@ result load_and_execute(const char* session_token,
     const uint8_t* body_ptr = nullptr;
     size_t body_size = 0;
     auto wm = watermark::verify(pe_bytes.data(), pe_bytes.size(),
-                                session_key, local_hwid, license_hash,
+                                k_watermark, local_hwid, license_hash,
                                 &body_ptr, &body_size);
     if (wm != watermark::result::ok) {
         scrub(pe_bytes);

@@ -1,6 +1,7 @@
 # Sec-blind server
 
-Go backend the C++ client in `..\Project1` talks to.
+Go backend for the commercial license server that the C++ client in
+`..\Project1` talks to.
 
 ## Build
 
@@ -36,7 +37,7 @@ $env:SB_MASTER_SECRET = -join ((1..32) | ForEach-Object { '{0:x2}' -f (Get-Rando
 
 ```powershell
 psql -U secblind -d secblind -c "INSERT INTO licenses (license_key) VALUES ('TEST-1234-5678-ABCD');"
-# Later, upload a PE for that license (replace with your build):
+# Later, upload the licensed binary for that license (replace with your build):
 psql -U secblind -d secblind -c "INSERT INTO payload_builds (license_id, pe_bytes) VALUES ((SELECT id FROM licenses WHERE license_key='TEST-1234-5678-ABCD'), pg_read_binary_file('C:/path/to/payload.dll'));"
 ```
 
@@ -75,5 +76,5 @@ Driven by the shipped client source; see `PLAN.md`:
 
 1. Login HKDF: salt = `hwid_hex_bytes || "SecBlind_HKDF_v1"`, info empty.
    `licenses.session_salt` dropped.
-2. Watermark `[0..32]` = hex-decoded HWID (32 raw bytes), not
+2. Session-binding `[0..32]` = hex-decoded HWID (32 raw bytes), not
    `SHA-256(hwid_hex_bytes)`.

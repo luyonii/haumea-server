@@ -14,6 +14,10 @@ struct response {
 
 bool init(const char* server_host, uint16_t port = 443);
 response post(const char* path, const std::string& json_body);
+// Closes the request handle currently in flight (if any), unblocking a thread
+// stuck in WinHttpSendRequest/WinHttpReceiveResponse. Safe to call from any
+// thread; safe if nothing is in flight.
+void cancel_in_flight();
 void shutdown();
 
 } // namespace net

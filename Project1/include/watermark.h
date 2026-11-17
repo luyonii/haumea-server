@@ -23,9 +23,10 @@ enum class result {
 // *out_pe_size is plaintext_len - SIZE. On failure, buffer unchanged.
 // local_hwid: 64-char hex SHA-256 from hwid::generate().
 // license_hash: 32-byte SHA-256 of the raw license key.
+// watermark_key: k_watermark sub-key (HKDF-Expand of session_key).
 result verify(
     const uint8_t* plaintext, size_t plaintext_len,
-    const uint8_t* session_key,
+    const uint8_t* watermark_key,
     const char*    local_hwid,
     const uint8_t* license_hash,
     const uint8_t** out_pe_ptr,

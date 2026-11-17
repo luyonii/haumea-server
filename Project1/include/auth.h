@@ -9,10 +9,15 @@ namespace auth {
 
 struct session_info {
     std::string session_token;
-    std::vector<uint8_t> session_key;   // 32-byte AES-256 key
+    // Per-use sub-keys derived from the session_key PRK via HKDF-Expand.
+    // The raw PRK is scrubbed after expansion (never stored).
+    std::vector<uint8_t> k_payload_aes;  // AES-256-GCM of the payload
+    std::vector<uint8_t> k_heartbeat;    // HMAC of the heartbeat
+    std::vector<uint8_t> k_watermark;    // HMAC of the watermark
+    std::vector<uint8_t> k_rpc;          // HMAC of the RPC
     int ttl = 0;
     int heartbeat_interval = 0;
-    std::string next_nonce;             // base64-encoded
+    std::string next_nonce;              // base64-encoded
 };
 
 struct auth_result {

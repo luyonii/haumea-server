@@ -1,12 +1,12 @@
-# Server Plan — Sec-blind Licensing Backend (Go)
+# Server Plan — Sec-blind Commercial License Server (Go)
 
-Prompt-ready spec para implementar o backend Go. Linguagem neutra; os parâmetros criptográficos **devem** bater byte-a-byte com o cliente.
+Prompt-ready spec para implementar o backend Go do servidor de licenciamento. Linguagem neutra; os parâmetros criptográficos **devem** bater byte-a-byte com o cliente.
 
 ---
 
 ## 1. Visão
 
-Serviço REST sobre TLS 1.3 que autentica licenças com HWID binding, mantém sessões curtas via heartbeat com nonce rotativo, entrega payload cifrado (AES-256-GCM) com watermark por sessão, e expõe RPC autenticado opcional.
+Servidor de licenciamento para um produto comercial Windows. Serviço REST sobre TLS 1.3 que autentica licenças com HWID binding (enforcement per-seat), mantém sessões curtas via heartbeat com nonce rotativo, entrega o binário licenciado cifrado (AES-256-GCM) com per-session integrity tag, e expõe RPC autenticado opcional. Mesmas primitivas que DRMs comerciais e servidores de licença corporativos.
 
 **Stack:** Go 1.23+, PostgreSQL 16+, Redis 7+, Nginx + Let's Encrypt.
 
@@ -77,7 +77,7 @@ Serviço REST sobre TLS 1.3 que autentica licenças com HWID binding, mantém se
   2. `next_nonce` recebido == `next_nonce` armazenado (anti-replay, constant-time compare).
   3. `timestamp` dentro de ±5 min do server now.
   4. `HMAC-SHA256(key=session_key, data=timestamp_string_bytes)` == `hmac` recebido. Constant-time.
-- **Logic:** renova TTL para 900 s, gera novo `next_nonce`, consulta flags de kill/revoke.
+- **Logic:** renova TTL para 900 s, gera novo `next_nonce`, consulta flags de revogação.
 - **Response 200:** `{"next_nonce":"<b64>","kill":false,"revoked":false}`.
 - **Response 401:** `{"error":"session_expired|invalid_token|invalid_hmac","message":"..."}`.
 
@@ -86,7 +86,7 @@ Serviço REST sobre TLS 1.3 que autentica licenças com HWID binding, mantém se
 - **Logic:**
   1. Sessão válida? Senão 401.
   2. Carregar PE build para essa license (coluna `payload_builds.pe_bytes`).
-  3. Montar watermark de 128 bytes **nesta ordem exata**:
+  3. Montar session-binding record de 128 bytes **nesta ordem exata** (per-session integrity tag prefixado ao PE):
 
      | Offset | Tamanho | Campo | Como gerar |
      |---|---|---|---|
@@ -95,9 +95,9 @@ Serviço REST sobre TLS 1.3 que autentica licenças com HWID binding, mantém se
      | 64 | 8 | `issued_at` | `uint64 little-endian` de `time.Now().Unix()` |
      | 72 | 8 | `ttl_seconds` | `uint64 little-endian`, **nunca 0** (cliente rejeita como expirado). Sugerido: 86400 (24 h) |
      | 80 | 16 | `nonce` | `crypto/rand(16)` |
-     | 96 | 32 | `signature` | `HMAC-SHA256(key=session_key, data=watermark[0:96])` |
+     | 96 | 32 | `signature` | `HMAC-SHA256(key=session_key, data=binding[0:96])` |
 
-  4. `plaintext = watermark || pe_bytes` (128 B + PE body).
+  4. `plaintext = binding || pe_bytes` (128 B + PE body).
   5. `iv = crypto/rand(12)`.
   6. `aead, _ := cipher.NewGCM(block)`, `sealed := aead.Seal(nil, iv, plaintext, nil)`.
      - Go concatena ciphertext + tag. Separar: `tag = sealed[len(sealed)-16:]`, `ciphertext = sealed[:len(sealed)-16]`.
@@ -206,9 +206,9 @@ sec-blind-server/
     auth/         # HKDF + HMAC verify + challenge-response
     session/      # Redis-backed session store
     hwid/         # bind + cooldown
-    payload/      # watermark gen + AES-GCM seal
+    payload/      # session-binding gen + AES-GCM seal
     rpc/          # method dispatch
-    abuse/        # rate limit + ban
+    abuse/        # rate limit + revogação
     db/           # postgres
     cache/        # redis
   pkg/crypto/     # hkdf.go, hmac.go, aesgcm.go — com testes
@@ -243,7 +243,7 @@ rate:
 
 1. **Vetores RFC 5869** em `pkg/crypto/hkdf_test.go`.
 2. **Round-trip AES-GCM** com vetores conhecidos.
-3. **Integration test**: cliente mock que faz `challenge → login → heartbeat → payload_fetch` e verifica decrypt + watermark bytes contra uma fixture.
+3. **Integration test**: cliente mock que faz `challenge → login → heartbeat → payload_fetch` e verifica decrypt + bytes do session-binding contra uma fixture.
 4. **Replay test**: reusar `next_nonce` deve falhar com 401.
 5. **HMAC fail-closed**: mutar 1 bit do HMAC enviado, deve falhar.
 
@@ -264,12 +264,12 @@ rate:
 ## 10. Pegadinhas conhecidas (não confunda)
 
 - **Base64:** cliente usa padding `=`. `RawStdEncoding` quebra tudo.
-- **Watermark:** `ttl == 0` é rejeitado como expirado. Sempre `>= 1`.
-- **Watermark:** `uint64` **little-endian** (`binary.LittleEndian`).
+- **Session-binding:** `ttl == 0` é rejeitado como expirado. Sempre `>= 1`.
+- **Session-binding:** `uint64` **little-endian** (`binary.LittleEndian`).
 - **AES-GCM:** o `tag` sai concatenado ao ciphertext em Go; separar antes de serializar.
 - **HKDF salt:** literal ASCII `"SecBlind_HKDF_v1"` — 16 bytes. Não adicionar null terminator.
-- **HMAC do watermark:** cobre bytes `[0..96)` apenas — não inclui o próprio signature nem bytes além.
+- **HMAC do session-binding:** cobre bytes `[0..96)` apenas — não inclui o próprio signature nem bytes além.
 - **RPC canonical:** `payload_json` é o span do wire, não o resultado de um re-marshal.
 - **Challenge response HKDF:** salt = `hwid_hex_bytes || "SecBlind_HKDF_v1"`, info **vazio**. Não existe `session_salt`.
-- **Session key HKDF info:** `session_id_bytes || hwid_hash_bytes` nessa ordem — `hwid_hash_bytes` é `hex.DecodeString(hwid_hex)` (32 B crus), igual ao watermark `[0..32)`.
-- **Watermark `[0..32)`:** 32 bytes crus do `hex.DecodeString(hwid_hex)`, **não** `SHA-256(hwid_hex)`.
+- **Session key HKDF info:** `session_id_bytes || hwid_hash_bytes` nessa ordem — `hwid_hash_bytes` é `hex.DecodeString(hwid_hex)` (32 B crus), igual ao session-binding `[0..32)`.
+- **Session-binding `[0..32)`:** 32 bytes crus do `hex.DecodeString(hwid_hex)`, **não** `SHA-256(hwid_hex)`.

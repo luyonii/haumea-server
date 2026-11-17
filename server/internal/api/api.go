@@ -21,6 +21,15 @@ import (
 	"github.com/secblind/server/pkg/crypto"
 )
 
+// HKDF-Expand info tags for session_key key-separation (RFC 5869 §3.3).
+// The client derives the same four sub-keys from the same PRK (session_key).
+var (
+	infoPayloadAES = []byte("sb.v1.payload.aes256gcm")
+	infoHeartbeat  = []byte("sb.v1.heartbeat.hmac")
+	infoWatermark  = []byte("sb.v1.watermark.hmac")
+	infoRPC        = []byte("sb.v1.rpc.hmac")
+)
+
 // --- Config passed in from main ---
 
 type Config struct {
@@ -31,6 +40,7 @@ type Config struct {
 	TimestampSkew     time.Duration // ±window
 	RatePerIP         int
 	RatePerHWID       int
+	RatePerHWIDFetch  int // per-HWID limit for /payload/fetch (heavier)
 }
 
 type Server struct {
@@ -58,16 +68,24 @@ func New(pg *store.PG, rdb *store.Redis, cfg Config) *Server {
 	if cfg.RatePerHWID == 0 {
 		cfg.RatePerHWID = 10
 	}
+	if cfg.RatePerHWIDFetch == 0 {
+		cfg.RatePerHWIDFetch = 6
+	}
 	return &Server{PG: pg, RDB: rdb, Cfg: cfg}
 }
 
 // Register wires the 5 endpoints to a mux.
 func (s *Server) Register(mux *http.ServeMux) {
-	mux.HandleFunc("/api/v1/auth/challenge", s.handleChallenge)
-	mux.HandleFunc("/api/v1/auth/login", s.handleLogin)
-	mux.HandleFunc("/api/v1/session/heartbeat", s.handleHeartbeat)
-	mux.HandleFunc("/api/v1/payload/fetch", s.handleFetch)
-	mux.HandleFunc("/api/v1/rpc/call", s.handleRPC)
+	reg := func(path string, h http.HandlerFunc) {
+		mux.Handle(path, observe(path, h))
+	}
+	reg("/api/v1/auth/challenge", s.handleChallenge)
+	reg("/api/v1/auth/login", s.handleLogin)
+	reg("/api/v1/session/heartbeat", s.handleHeartbeat)
+	reg("/api/v1/payload/fetch", s.handleFetch)
+	reg("/api/v1/rpc/call", s.handleRPC)
+	// TODO: protect by bind-address or token; today it answers on any iface the server binds.
+	reg("/debug/metrics", metricsHandler)
 }
 
 // ---- Helpers ----
@@ -102,12 +120,22 @@ func clientIP(r *http.Request) string {
 }
 
 func (s *Server) rateLimit(ctx context.Context, ip, hwid string) bool {
+	return s.rateLimitWith(ctx, ip, hwid, s.Cfg.RatePerHWID, "rate:hwid:")
+}
+
+// rateLimitFetch uses a smaller per-HWID bucket on a dedicated key, so a token
+// holder cannot burn the heavy /payload/fetch path at the generic HWID rate.
+func (s *Server) rateLimitFetch(ctx context.Context, ip, hwid string) bool {
+	return s.rateLimitWith(ctx, ip, hwid, s.Cfg.RatePerHWIDFetch, "rate:hwid_fetch:")
+}
+
+func (s *Server) rateLimitWith(ctx context.Context, ip, hwid string, hwidLimit int, hwidPrefix string) bool {
 	ok, _ := s.RDB.Allow(ctx, "rate:ip:"+ip, s.Cfg.RatePerIP)
 	if !ok {
 		return false
 	}
 	if hwid != "" {
-		ok, _ = s.RDB.Allow(ctx, "rate:hwid:"+hwid, s.Cfg.RatePerHWID)
+		ok, _ = s.RDB.Allow(ctx, hwidPrefix+hwid, hwidLimit)
 	}
 	return ok
 }
@@ -192,11 +220,36 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 1) license exists and not banned
+	// Uniform failure response for any credential-related rejection.
+	// Reasons are logged internally (abuse_log) but never leaked via HTTP:
+	// otherwise an attacker learns which of license/challenge/HMAC was wrong.
+	failAuth := func(licID *int64, reason string) {
+		s.PG.LogAbuse(ctx, licID, ip, reason)
+		writeErr(w, http.StatusUnauthorized, "invalid_credentials", "")
+	}
+
+	// 1) consume challenge FIRST (one-shot GETDEL). One challenge = one attempt,
+	// regardless of whether the license exists, is banned, or the HMAC matches.
+	stored, err := s.RDB.TakeChallenge(ctx, req.HWID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "server_error", "redis")
+		return
+	}
+	if stored == "" || stored != req.Challenge {
+		metricInc("challenge_consumed_fail_total", "/auth/login")
+		failAuth(nil, "bad_challenge")
+		return
+	}
+	nonce, err := base64.StdEncoding.DecodeString(stored)
+	if err != nil {
+		failAuth(nil, "challenge_decode")
+		return
+	}
+
+	// 2) license exists and not banned
 	lic, err := s.PG.LicenseByKey(ctx, req.LicenseKey)
 	if errors.Is(err, store.ErrNotFound) {
-		s.PG.LogAbuse(ctx, nil, ip, "unknown_license")
-		writeErr(w, http.StatusUnauthorized, "invalid_credentials", "")
+		failAuth(nil, "unknown_license")
 		return
 	}
 	if err != nil {
@@ -204,27 +257,11 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if lic.Banned {
-		writeErr(w, http.StatusUnauthorized, "banned", "license banned")
+		failAuth(&lic.ID, "banned")
 		return
 	}
 	if killed, _ := s.PG.KillStatus(ctx, lic.ID); killed {
-		writeErr(w, http.StatusUnauthorized, "banned", "license killed")
-		return
-	}
-
-	// 2) consume challenge (one-shot)
-	stored, err := s.RDB.TakeChallenge(ctx, req.HWID)
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "server_error", "redis")
-		return
-	}
-	if stored == "" || stored != req.Challenge {
-		writeErr(w, http.StatusUnauthorized, "invalid_credentials", "challenge missing or mismatch")
-		return
-	}
-	nonce, err := base64.StdEncoding.DecodeString(stored)
-	if err != nil {
-		writeErr(w, http.StatusUnauthorized, "invalid_credentials", "challenge decode")
+		failAuth(&lic.ID, "killed")
 		return
 	}
 
@@ -243,8 +280,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	expected := crypto.HMAC256(derived, nonce)
 	gotMAC, err := base64.StdEncoding.DecodeString(req.ChallengeResponse)
 	if err != nil || !crypto.Equal(gotMAC, expected) {
-		s.PG.LogAbuse(ctx, &lic.ID, ip, "bad_challenge_response")
-		writeErr(w, http.StatusUnauthorized, "invalid_credentials", "challenge response mismatch")
+		failAuth(&lic.ID, "bad_challenge_response")
 		return
 	}
 
@@ -299,6 +335,10 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "server_error", "sess hkdf")
 		return
 	}
+	// session_key is the PRK. Per-use sub-keys (k_payload_aes, k_heartbeat,
+	// k_watermark, k_rpc) are derived via crypto.HKDFExpand at point of use in
+	// the /heartbeat, /payload/fetch and /rpc/call handlers — the client expands
+	// the same way. session_key itself is returned to the client unchanged.
 
 	nextNonce, _ := crypto.RandBytes(32)
 	nextNonceB64 := base64.StdEncoding.EncodeToString(nextNonce)
@@ -354,6 +394,13 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnauthorized, "session_expired", "")
 		return
 	}
+	if !s.rateLimit(ctx, clientIP(r), sess.HWID) {
+		metricInc("rate_limited_total", "/session/heartbeat")
+		writeJSON(w, http.StatusTooManyRequests, map[string]any{
+			"error": "rate_limited", "retry_after": 30,
+		})
+		return
+	}
 
 	// Anti-replay: supplied nonce must match stored.
 	if !crypto.Equal([]byte(req.NextNonce), []byte(sess.NextNonce)) {
@@ -382,15 +429,32 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "server_error", "key decode")
 		return
 	}
-	expected := crypto.HMAC256(sessionKey, []byte(req.Timestamp))
+	kHeartbeat := crypto.HKDFExpand(sessionKey, infoHeartbeat, 32)
+	expected := crypto.HMAC256(kHeartbeat, []byte(req.Timestamp))
 	got, err := base64.StdEncoding.DecodeString(req.HMAC)
 	if err != nil || !crypto.Equal(got, expected) {
+		metricInc("hmac_fail_total", "/session/heartbeat")
 		writeErr(w, http.StatusUnauthorized, "invalid_hmac", "")
 		return
 	}
 
 	// Rotate nonce, renew TTL. Check kill flag.
 	killed, _ := s.PG.KillStatus(ctx, sess.LicenseID)
+	if killed {
+		// Kill: drop session + latest_token, never renew TTL.
+		s.RDB.DeleteSession(ctx, req.Token)
+		s.RDB.KillSessionsFor(ctx, sess.LicenseID)
+		tp := req.Token
+		if len(tp) > 8 {
+			tp = tp[:8]
+		}
+		log.Printf("kill_enforced endpoint=heartbeat token_prefix=%s", tp)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"kill":    true,
+			"revoked": false,
+		})
+		return
+	}
 
 	newNonce, _ := crypto.RandBytes(32)
 	newNonceB64 := base64.StdEncoding.EncodeToString(newNonce)
@@ -434,6 +498,13 @@ func (s *Server) handleFetch(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnauthorized, "session_expired", "")
 		return
 	}
+	if !s.rateLimitFetch(ctx, clientIP(r), sess.HWID) {
+		metricInc("rate_limited_total", "/payload/fetch")
+		writeJSON(w, http.StatusTooManyRequests, map[string]any{
+			"error": "rate_limited", "retry_after": 30,
+		})
+		return
+	}
 
 	lic, err := licenseByID(ctx, s.PG, sess.LicenseID)
 	if err != nil {
@@ -461,7 +532,8 @@ func (s *Server) handleFetch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	wm, err := buildWatermark(sess.HWID, lic.Key, sessionKey)
+	kWatermark := crypto.HKDFExpand(sessionKey, infoWatermark, 32)
+	wm, err := buildWatermark(sess.HWID, lic.Key, kWatermark)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "server_error", "watermark")
 		return
@@ -471,7 +543,8 @@ func (s *Server) handleFetch(w http.ResponseWriter, r *http.Request) {
 	plaintext = append(plaintext, wm...)
 	plaintext = append(plaintext, pe...)
 
-	sealed, err := crypto.SealGCM(sessionKey, plaintext)
+	kPayloadAES := crypto.HKDFExpand(sessionKey, infoPayloadAES, 32)
+	sealed, err := crypto.SealGCM(kPayloadAES, plaintext)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "server_error", "seal")
 		return
@@ -485,7 +558,7 @@ func (s *Server) handleFetch(w http.ResponseWriter, r *http.Request) {
 
 // buildWatermark assembles the 128-byte block the client expects.
 // Layout matches watermark.cpp; see PLAN.md for the hwid-field deviation from SERVER_PLAN.
-func buildWatermark(hwidHex, licenseKey string, sessionKey []byte) ([]byte, error) {
+func buildWatermark(hwidHex, licenseKey string, watermarkKey []byte) ([]byte, error) {
 	wm := make([]byte, 128)
 
 	hwidBytes, err := hex.DecodeString(hwidHex)
@@ -506,7 +579,7 @@ func buildWatermark(hwidHex, licenseKey string, sessionKey []byte) ([]byte, erro
 	}
 	copy(wm[80:96], nonce)
 
-	sig := crypto.HMAC256(sessionKey, wm[0:96])
+	sig := crypto.HMAC256(watermarkKey, wm[0:96])
 	copy(wm[96:128], sig)
 	return wm, nil
 }
@@ -546,6 +619,13 @@ func (s *Server) handleRPC(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnauthorized, "session_expired", "")
 		return
 	}
+	if !s.rateLimit(ctx, clientIP(r), sess.HWID) {
+		metricInc("rate_limited_total", "/rpc/call")
+		writeJSON(w, http.StatusTooManyRequests, map[string]any{
+			"error": "rate_limited", "retry_after": 30,
+		})
+		return
+	}
 
 	ts, err := strconv.ParseInt(req.Timestamp, 10, 64)
 	if err != nil {
@@ -580,9 +660,11 @@ func (s *Server) handleRPC(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "server_error", "key")
 		return
 	}
-	expected := crypto.HMAC256(sessionKey, canon)
+	kRPC := crypto.HKDFExpand(sessionKey, infoRPC, 32)
+	expected := crypto.HMAC256(kRPC, canon)
 	got, err := base64.StdEncoding.DecodeString(req.HMAC)
 	if err != nil || !crypto.Equal(got, expected) {
+		metricInc("hmac_fail_total", "/rpc/call")
 		writeErr(w, http.StatusUnauthorized, "invalid_hmac", "")
 		return
 	}

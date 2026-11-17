@@ -1,6 +1,8 @@
 # Sec-blind integration harness
 
-End-to-end runbook. Everything below runs from `integration\` unless noted.
+End-to-end runbook for the commercial license-server smoke test:
+infra + license server + loader + dummy licensed DLL. Everything below
+runs from `integration\` unless noted.
 
 ## Prereqs
 - Docker Desktop (Windows), Developer PowerShell for VS 2026, Go toolchain.
@@ -13,7 +15,7 @@ End-to-end runbook. Everything below runs from `integration\` unless noted.
    docker compose up -d postgres redis
    ```
 
-2. **Build dummy DLL payload** (Developer PowerShell for VS 2026)
+2. **Build dummy licensed DLL** (Developer PowerShell for VS 2026) — stands in for the vendor's commercial binary
    ```powershell
    .\scripts\build_dummy_payload.ps1
    ```
@@ -57,7 +59,7 @@ End-to-end runbook. Everything below runs from `integration\` unless noted.
    - `/auth/challenge` → 200
    - `/auth/login` → 200 (binds this machine's HWID on first call)
    - `/session/heartbeat` → 200 every 60s
-   - `/payload/fetch` → 200, watermark verifies, DLL maps, MessageBox `"payload loaded"` appears.
+   - `/payload/fetch` → 200, session-binding verifies, DLL maps, MessageBox `"payload loaded"` appears.
 
    Watch: `docker compose logs -f nginx` and the Go server stdout.
 

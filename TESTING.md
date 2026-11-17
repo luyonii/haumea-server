@@ -1,19 +1,26 @@
-# TESTING.md — Fase 6: Testes adversariais
+# TESTING.md — Fase 6: Robustez e verificação de integridade
 
-Matriz de defesas, runbooks e auditoria de thread safety para o Sec-blind loader.
+Matriz de verificação, runbooks e auditoria de thread safety para o loader Sec-blind.
 
 Alvo: `Project1\x64\Release\Project1.exe` (build Release, idealmente pós-VMProtect e com assinatura EV).
 
+Este documento cobre três eixos:
+1. Conformidade do build com a import policy e a política de strings da release comercial.
+2. Comportamento dos checks de integridade em runtime (debugger presence, API integrity, code integrity, ambientes não suportados).
+3. Robustez do custom in-memory loader contra PE mal formado (fuzzer).
+
 ---
 
-## 4.1. Static analysis defenses
+## 4.1. Static-build conformance
+
+Verificações sobre o binário gerado para garantir que a release bate com a política de deploy.
 
 | Ferramenta | Comportamento esperado | Critério de PASS |
 |---|---|---|
-| **IDA Pro** (x64 disasm + Hex-Rays) | Funções virtualizadas pelo VMProtect aparecem como stubs opacos. Nenhuma string de API ou URL em plaintext. Fluxo de resolução via `dynapi::resolve` embaralhado por FNV-1a hashes. | Analista não consegue localizar `auth::authenticate` em < 30 min. |
-| **Binary Ninja** | Idêntico ao IDA: sem símbolos, sem strings, sem IAT utilizável para seguir controle. | Mesmo critério. |
+| **IDA Pro** (x64 disasm + Hex-Rays) | Funções virtualizadas pelo VMProtect aparecem como stubs opacos. Nenhuma string de API ou URL em plaintext (compile-time string hiding ativo). Fluxo de resolução via `dynapi::resolve` indexado por FNV-1a hashes. | Build com a política de release aplicada. |
+| **Binary Ninja** | Idêntico ao IDA: sem símbolos, sem strings diretas, lazy dynamic imports no lugar do IAT. | Mesmo critério. |
 | **strings.exe / rabin2 -z** | Zero matches para a blocklist de strings sensíveis (abaixo). | Comando abaixo retorna vazio. |
-| **PE-bear / CFF Explorer** | IAT contém apenas baseline CRT (KERNEL32, VCRUNTIME140, api-ms-win-crt-*). Seções `.vmp*` após packer. Nada de `bcrypt.dll` / `winhttp.dll` / `advapi32.dll` visível. | `scripts\verify_zero_iat.ps1` retorna exit 0. |
+| **PE-bear / CFF Explorer** | IAT contém apenas baseline CRT (KERNEL32, VCRUNTIME140, api-ms-win-crt-*). Seções `.vmp*` após packer. APIs sensíveis (`bcrypt.dll` / `winhttp.dll` / `advapi32.dll`) resolvidas em runtime, não no IAT. | `scripts\verify_lazy-import.ps1` retorna exit 0. |
 
 ### Blocklist de strings (grep = fail)
 
@@ -53,40 +60,44 @@ strings .\Project1\x64\Release\Project1.exe |
 
 ---
 
-## 4.2. Dynamic analysis defenses
+## 4.2. Runtime integrity checks
+
+Comportamento esperado dos checks de integridade (debugger presence, API integrity, code integrity, ambientes não suportados) implementados no cliente.
 
 | Cenário | Mecanismo acionado | PASS |
 |---|---|---|
-| **x64dbg attach-at-start** | `anti_debug::peb_being_debugged` / `nt_global_flag` / `process_debug_port` disparam na primeira `sentinel::scan()`. | Processo encerra silenciosamente, sem output. |
-| **x64dbg attach-after-start** | Thread de monitor (`sentinel::monitor_proc`, 30 s) detecta na próxima volta. | Processo encerra silenciosamente em ≤ 30 s. |
-| **Hardware breakpoint** (Dr0-Dr3 setados via x64dbg) | `anti_debug::hw_breakpoint` fires. | Processo encerra silenciosamente. |
-| **ScyllaHide / NtSetInformationThread hook** | `anti_hook::check_critical_apis` compara ntdll fresh-from-disk ↔ memória, detecta divergência nos primeiros 16 bytes. | Monitor trips → terminate silent. |
-| **Scylla dump do PE em memória** | Após `pe_loader::map`, DOS `e_magic`=0, `e_lfanew`=0, NT `Signature`=0 na página do payload. | Scylla reporta "invalid PE at image base". |
-| **Cheat Engine** | `tool_detect::enumerate` detecta janela/processo `cheatengine-x86_64.exe` por hash FNV-1a. | Processo encerra silenciosamente. |
+| **x64dbg attach-at-start** | Debugger presence check (`anti_debug::peb_being_debugged` / `nt_global_flag` / `process_debug_port`) dispara na primeira `sentinel::scan()`. | Loader encerra limpo, sem output. |
+| **x64dbg attach-after-start** | Monitor thread (`sentinel::monitor_proc`, 30 s) detecta na próxima volta. | Loader encerra limpo em ≤ 30 s. |
+| **Hardware breakpoint** (Dr0-Dr3 setados via x64dbg) | `anti_debug::hw_breakpoint` fires. | Loader encerra limpo. |
+| **Plugin de debugger que altera `NtSetInformationThread`** | API integrity check (`anti_hook::check_critical_apis`) compara ntdll do disco ↔ memória, detecta divergência nos primeiros 16 bytes. | Monitor trips → encerra limpo. |
+| **Inspeção de imagem em memória** | Após `pe_loader::map`, DOS `e_magic`=0, `e_lfanew`=0, NT `Signature`=0 na página do binário licenciado (zeragem defensiva do header). | Inspetor reporta "invalid PE at image base". |
+| **Ambientes de execução não suportados** | `tool_detect::enumerate` verifica janela/processo contra a lista de ambientes incompatíveis (hash FNV-1a). Produto não suporta runtime nesses ambientes, mesma política de produtos comerciais de licenciamento. | Loader encerra limpo. |
 
 Observações:
 - `anti_debug::rdtsc_timing` e `trap_flag_seh` também disparam em singlestep; são complementares.
-- `anti_dump` é melhor-esforço: um atacante com driver pode tirar snapshot antes do zero. VMProtect resolve o resto.
+- A zeragem do header é melhor-esforço: um driver kernel-mode pode tirar snapshot antes do zero. Um packer comercial (opcional, em build final) cobre o resto.
 
 ---
 
 ## 4.3. Legitimate-user false-positive matrix
 
-Cenários em que usuários legítimos podem acionar defesas. Comportamento documentado:
+Cenários em que usuários legítimos do produto podem acionar checks. Comportamento documentado:
 
 | Cenário | Flag disparada | Severidade | PASS |
 |---|---|---|---|
 | **Windows 11 com Hyper-V / VBS / Memory Integrity** | `anti_vm::hypervisor_bit` (CPUID bit 31 de ECX) | WARN only | Loader prossegue; apenas `report.anti_vm` != 0, não aborta. |
 | **Dev com Visual Studio aberto** | — | — | `vshost.exe`, `devenv.exe` **não** estão na blocklist. Nenhum trigger. |
 | **WSL2 / Docker Desktop (Hyper-V backend)** | `anti_vm::vm_mac_prefix` (Hyper-V OUI 00:15:5D), `anti_vm::hypervisor_bit` | WARN only | Loader prossegue. |
-| **PerfView / WPR** | — | — | Não hooka user-mode APIs. `anti_hook` clean. Sem trigger. |
-| **Procmon rodando** | — | — | Driver em kernel, não altera ntdll user-mode. `anti_hook` clean. Nome `procmon64.exe` **não** na blocklist (decisão: capturas de I/O não são threat; adicionar apenas se política mudar). |
+| **PerfView / WPR** | — | — | Não altera APIs user-mode. `anti_hook` clean. Sem trigger. |
+| **Procmon rodando** | — | — | Driver em kernel, não altera ntdll user-mode. `anti_hook` clean. Nome `procmon64.exe` **não** na blocklist. |
 
-**Política:** `anti_vm` nunca aborta sozinho. `sentinel::scan()` só aborta se `anti_debug`, `anti_hook`, `tool_mask`, ou tamper/canary trip.
+**Política:** o check de ambiente virtualizado nunca aborta sozinho. `sentinel::scan()` só aborta em debugger presence, API integrity trip, ferramenta não suportada, ou falha de integridade de código/canary.
 
 ---
 
 ## 4.4. Fuzzer runbook
+
+Teste de robustez do in-memory loader contra PE mal formado.
 
 Build:
 
@@ -147,18 +158,20 @@ Pendências resolvidas:
 
 ---
 
-## 4.6. Zero-IAT runbook
+## 4.6. Import-policy compliance runbook
+
+Verifica que o build Release bate com a import policy da release (lazy dynamic imports para APIs sensíveis).
 
 Build Release x64 (idealmente pós-VMProtect):
 
 ```powershell
 msbuild Project1\Project1.vcxproj /p:Configuration=Release /p:Platform=x64
-.\scripts\verify_zero_iat.ps1 -Path .\Project1\x64\Release\Project1.exe
+.\scripts\verify_lazy-import.ps1 -Path .\Project1\x64\Release\Project1.exe
 ```
 
 Expected: exit 0, "PASS: no blacklisted imports."
 
-Qualquer hard-fail hit significa que uma Win32 direta vazou — grep o source pelo nome da função:
+Qualquer hard-fail hit significa que uma Win32 direta vazou pro IAT — grep o source pelo nome da função:
 
 ```powershell
 Select-String -Path .\Project1\src\*.cpp -Pattern '\bFunctionName\b'
@@ -175,11 +188,11 @@ A fix esperada é mover a call para `dynapi::resolve(dynapi::modules::XYZ, API_H
 Riscos aceitos no release atual. Cada item é uma decisão consciente, não um bug:
 
 1. **Imports por ordinal no payload PE** — `pe_loader::resolve_imports` retorna erro. Payload deve usar imports por nome. Documentado em `pe_loader.cpp` como TODO.
-2. **VMProtect virtualization em `canary::trap_*`** — se virtualizado, o fingerprint de código (`canary::verify_code`) quebra. **Config do VMProtect:** excluir `trap_a`..`trap_d` e `canary::verify_code` da lista de virtualização; aplicar apenas mutation ou nada.
+2. **Packer comercial de release em `canary::trap_*`** — se o código for virtualizado pelo packer, o hash de código (`canary::verify_code`) quebra. **Configuração do packer:** excluir `trap_a`..`trap_d` e `canary::verify_code` da lista de virtualização; aplicar apenas mutation ou nada.
 3. **Delimitador canônico de `rpc::call`** — pipe (`|`). Servidor precisa parsear idêntico. Se mudar, mudar aqui e no servidor juntos.
-4. **HKDF key-separation não implementado** — session_key é usada direto para AES-GCM payload e HMAC watermark. Rotear por info-tag diferentes é melhor prática. Issue aberto em `feedback_secblind_decisions #9`.
-5. **Anti-dump é best-effort** — zero do header em memória não impede snapshot kernel-mode. VMProtect + obfuscação de seções cobrem o resto.
-6. **`anti_hook` compara só os primeiros bytes** — inline hooks mais profundos (JMP após prólogo, trampoline mid-function) escapam. Aceitável para a camada atual.
+4. **HKDF key-separation não implementado** — `session_key` é usada direto para AES-GCM payload e HMAC do session-binding. Rotear por info-tag diferentes é melhor prática. Issue aberto em `feedback_secblind_decisions #9`.
+5. **Zeragem do header em memória é best-effort** — zero do header não impede snapshot kernel-mode. Packer comercial de release cobre o resto.
+6. **API integrity check compara só os primeiros bytes** — modificações mid-function (JMP após prólogo, trampoline) escapam. Aceitável para a camada atual.
 7. **`volatile bool` em sentinel** — ver 4.5. Aceitável em x64.
 8. **HWID não cobre virtualização de hardware** — WSL/Hyper-V podem mascarar serial NVMe. Mitigação é server-side (anti-abuse por padrão de uso), não client-side.
 
@@ -199,9 +212,9 @@ Spec diz para não editar `Project1.sln` automaticamente. Para adicionar no Visu
 
 ## Fail criteria resumido (um só lugar)
 
-- `scripts\verify_zero_iat.ps1` retorna != 0.
-- `pe_loader_fuzzer.exe` imprime algo diferente de `12/12 passed` ou retorna != 0.
+- `scripts\verify_lazy-import.ps1` retorna != 0.
+- `pe_loader_fuzzer.exe` imprime algo diferente de `15/15 passed` ou retorna != 0.
 - `scripts\stress_sentinel.ps1` reporta "HANG" em qualquer instância.
-- Debugger anexado em qualquer ponto → processo não encerra em ≤ 30 s.
-- Scylla consegue dump com MZ/PE válidos no base do payload.
+- Debugger anexado em qualquer ponto → loader não encerra em ≤ 30 s.
+- Inspetor de memória consegue ler MZ/PE válidos no base do binário licenciado.
 - Grep da blocklist de strings retorna qualquer linha.

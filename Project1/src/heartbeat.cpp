@@ -146,7 +146,14 @@ void stop() {
 
     pSetEvent(s_stop_event);
     if (s_thread) {
-        pWaitFor(s_thread, 10000);
+        // Worker may be blocked inside WinHttpSendRequest/ReceiveResponse and
+        // will not observe s_stop_event until the HTTP call returns. If the
+        // first wait times out, cancel the in-flight request to unblock it;
+        // otherwise it would touch net handles after net::shutdown() -> UAF.
+        if (pWaitFor(s_thread, 2000) == WAIT_TIMEOUT) {
+            net::cancel_in_flight();
+            pWaitFor(s_thread, 8000);
+        }
         pCloseHandle(s_thread);
         s_thread = nullptr;
     }

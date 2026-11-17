@@ -1,4 +1,5 @@
 #include "auth.h"
+#include "crypto.h"
 #include "net.h"
 #include "dynapi.h"
 #include "obfstr.h"
@@ -212,16 +213,50 @@ auth_result authenticate(const std::string& license_key, const std::string& hwid
     // --- Parse session info ---
     result.session.session_token = json::get_string(resp.body, "session_token");
     auto sk_b64 = json::get_string(resp.body, "session_key");
-    result.session.session_key   = base64::decode(sk_b64);
+    auto prk = base64::decode(sk_b64);   // session_key PRK, 32 bytes
     result.session.ttl           = static_cast<int>(json::get_int(resp.body, "ttl", 900));
     result.session.heartbeat_interval =
         static_cast<int>(json::get_int(resp.body, "heartbeat_interval", 60));
     result.session.next_nonce    = json::get_string(resp.body, "next_nonce");
 
-    if (result.session.session_token.empty() ||
-        result.session.session_key.size() != 32)
-    {
+    if (result.session.session_token.empty() || prk.size() != 32) {
+        volatile uint8_t* pp = prk.empty() ? nullptr : prk.data();
+        if (pp) for (size_t i = 0; i < prk.size(); ++i) pp[i] = 0;
         result.error_message = "Invalid session data from server";
+        return result;
+    }
+
+    // Key separation (RFC 5869 3.3): derive one sub-key per use from the PRK.
+    // Info tags must match the Go server byte-for-byte. OBF needs a literal at
+    // the call site, so each tag is expanded explicitly.
+    bool expand_ok = true;
+    auto i0 = OBF("sb.v1.payload.aes256gcm");
+    auto i1 = OBF("sb.v1.heartbeat.hmac");
+    auto i2 = OBF("sb.v1.watermark.hmac");
+    auto i3 = OBF("sb.v1.rpc.hmac");
+    const struct { std::vector<uint8_t>* dst; const char* p; size_t n; } ex[] = {
+        {&result.session.k_payload_aes, i0.c_str(), i0.size()},
+        {&result.session.k_heartbeat,   i1.c_str(), i1.size()},
+        {&result.session.k_watermark,   i2.c_str(), i2.size()},
+        {&result.session.k_rpc,         i3.c_str(), i3.size()},
+    };
+    for (auto& e : ex) {
+        e.dst->resize(32);
+        if (!crypto::hkdf_expand(prk.data(), prk.size(),
+                                 reinterpret_cast<const uint8_t*>(e.p), e.n,
+                                 e.dst->data(), 32)) {
+            expand_ok = false;
+        }
+    }
+
+    // Scrub the PRK: only the sub-keys survive.
+    volatile uint8_t* pp = prk.data();
+    for (size_t i = 0; i < prk.size(); ++i) pp[i] = 0;
+    prk.clear();
+
+    if (!expand_ok) {
+        clear_session(result.session);
+        result.error_message = "Sub-key derivation failed";
         return result;
     }
 
@@ -229,12 +264,18 @@ auth_result authenticate(const std::string& license_key, const std::string& hwid
     return result;
 }
 
+static void scrub_vec(std::vector<uint8_t>& v) {
+    if (v.empty()) return;
+    volatile uint8_t* p = v.data();
+    for (size_t i = 0; i < v.size(); ++i) p[i] = 0;
+    v.clear();
+}
+
 void clear_session(session_info& info) {
-    if (!info.session_key.empty()) {
-        volatile uint8_t* p = info.session_key.data();
-        for (size_t i = 0; i < info.session_key.size(); ++i) p[i] = 0;
-        info.session_key.clear();
-    }
+    scrub_vec(info.k_payload_aes);
+    scrub_vec(info.k_heartbeat);
+    scrub_vec(info.k_watermark);
+    scrub_vec(info.k_rpc);
     info.session_token.clear();
     info.next_nonce.clear();
     info.ttl = 0;

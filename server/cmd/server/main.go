@@ -1,12 +1,19 @@
+// TLS: server listens plain HTTP on 0.0.0.0:8080 behind an nginx TLS terminator.
+// Production MUST bind 127.0.0.1 only + firewall rule blocking 0.0.0.0:8080,
+// OR reject requests where X-Forwarded-Proto != https.
+// Current dev config is for the integration harness only.
 package main
 
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -24,8 +31,9 @@ type config struct {
 	HeartbeatS    int    `yaml:"heartbeat_s"`
 	HWIDCooldownD int    `yaml:"hwid_cooldown_d"`
 	Rate          struct {
-		PerIPRPM   int `yaml:"per_ip_rpm"`
-		PerHWIDRPM int `yaml:"per_hwid_rpm"`
+		PerIPRPM        int `yaml:"per_ip_rpm"`
+		PerHWIDRPM      int `yaml:"per_hwid_rpm"`
+		PerHWIDRPMFetch int `yaml:"per_hwid_rpm_payload_fetch"`
 	} `yaml:"rate"`
 }
 
@@ -68,6 +76,12 @@ func main() {
 		log.Fatalf("postgres: %v", err)
 	}
 	defer pg.Close()
+	pingCtx, pingCancel := context.WithTimeout(ctx, 5*time.Second)
+	err = pg.Pool.Ping(pingCtx)
+	pingCancel()
+	if err != nil {
+		log.Fatalf("postgres unreachable: %v", err)
+	}
 
 	rdb := store.OpenRedis(cfg.RedisAddr)
 	defer rdb.Close()
@@ -79,6 +93,7 @@ func main() {
 		HWIDCooldown:      time.Duration(cfg.HWIDCooldownD) * 24 * time.Hour,
 		RatePerIP:         cfg.Rate.PerIPRPM,
 		RatePerHWID:       cfg.Rate.PerHWIDRPM,
+		RatePerHWIDFetch:  cfg.Rate.PerHWIDRPMFetch,
 	}
 	srv := api.New(pg, rdb, apiCfg)
 
@@ -100,5 +115,28 @@ func main() {
 		IdleTimeout:       60 * time.Second,
 	}
 	// shortcut: plain HTTP. Terminate TLS at Nginx. Upgrade when running standalone.
-	log.Fatal(hs.ListenAndServe())
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+
+	errc := make(chan error, 1)
+	go func() { errc <- hs.ListenAndServe() }()
+
+	select {
+	case err := <-errc:
+		// Close pools explicitly so Fatalf-less exit still flushes resources
+		// (defers would run, but Fatalf skips them — close first, then fatal).
+		rdb.Close()
+		pg.Close()
+		log.Fatalf("listen: %v", err)
+	case s := <-sig:
+		log.Printf("signal %v: shutting down (30s drain)", s)
+	}
+
+	sctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := hs.Shutdown(sctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		log.Printf("shutdown: %v", err)
+	}
+	// pg/rdb closed by the defers above, after the drain.
+	log.Printf("bye")
 }

@@ -16,16 +16,19 @@
 #include <cstring>
 #include <string>
 
-// File-scope snapshot of the payload session key. Kept off the stack so the
-// sentinel monitor thread can scrub it via a registered callback on trip.
-static volatile uint8_t g_payload_key[32] = {};
+// File-scope snapshot of the payload sub-keys. Kept off the stack so the
+// sentinel monitor thread can scrub them via a registered callback on trip.
+static volatile uint8_t g_payload_aes_key[32] = {};  // k_payload_aes (AES-GCM)
+static volatile uint8_t g_watermark_key[32]  = {};   // k_watermark (binding HMAC)
 // SHA-256 of the license key — needed by payload to verify watermark after
 // the raw license string is already scrubbed.
 static volatile uint8_t g_license_hash[32] = {};
 
 void scrub_payload_key() {
-    volatile uint8_t* p = g_payload_key;
-    for (int i = 0; i < 32; ++i) p[i] = 0;
+    volatile uint8_t* a = g_payload_aes_key;
+    for (int i = 0; i < 32; ++i) a[i] = 0;
+    volatile uint8_t* w = g_watermark_key;
+    for (int i = 0; i < 32; ++i) w[i] = 0;
     volatile uint8_t* h = g_license_hash;
     for (int i = 0; i < 32; ++i) h[i] = 0;
 }
@@ -126,7 +129,7 @@ int main() {
     // --- Heartbeat ---
     if (!heartbeat::start(
             result.session.session_token.c_str(),
-            result.session.session_key.data(),
+            result.session.k_heartbeat.data(),
             result.session.heartbeat_interval,
             result.session.next_nonce.c_str()))
     {
@@ -136,13 +139,16 @@ int main() {
         return 1;
     }
 
-    // Snapshot session data needed after clear_session for the payload fetch.
-    // The key lives at file scope (g_payload_key) so the sentinel monitor can
-    // scrub it from another thread on trip.
+    // Snapshot the payload sub-keys needed after clear_session for the fetch.
+    // They live at file scope so the sentinel monitor can scrub them from
+    // another thread on trip.
     {
-        volatile uint8_t* gk = g_payload_key;
-        const uint8_t* src = result.session.session_key.data();
-        for (int i = 0; i < 32; ++i) gk[i] = src[i];
+        volatile uint8_t* ga = g_payload_aes_key;
+        const uint8_t* sa = result.session.k_payload_aes.data();
+        for (int i = 0; i < 32; ++i) ga[i] = sa[i];
+        volatile uint8_t* gw = g_watermark_key;
+        const uint8_t* sw = result.session.k_watermark.data();
+        for (int i = 0; i < 32; ++i) gw[i] = sw[i];
     }
     sentinel::set_scrub_callback(&scrub_payload_key);
     sentinel::start_monitor(crc_baseline, code_baseline);
@@ -156,7 +162,8 @@ int main() {
     printf("Fetching payload...\n");
     auto pr = payload::load_and_execute(
         payload_token.c_str(),
-        const_cast<const uint8_t*>(g_payload_key),
+        const_cast<const uint8_t*>(g_payload_aes_key),
+        const_cast<const uint8_t*>(g_watermark_key),
         id.c_str(),
         const_cast<const uint8_t*>(g_license_hash),
         /*is_dll=*/true);
