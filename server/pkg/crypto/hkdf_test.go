@@ -25,7 +25,11 @@ func TestHKDFExpandSubKeys(t *testing.T) {
 		{"k_rpc", "sb.v1.rpc.hmac", "8ea36ae7b6b9bb5034f6445b723b83a0710f2f1b781127a3ee7bf0dfb5cf4793"},
 	}
 	for _, c := range cases {
-		got := hex.EncodeToString(HKDFExpand(prk, []byte(c.info), 32))
+		b, err := HKDFExpand(prk, []byte(c.info), 32)
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		got := hex.EncodeToString(b)
 		if got != c.want {
 			t.Errorf("%s: got %s want %s", c.name, got, c.want)
 		}

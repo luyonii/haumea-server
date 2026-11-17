@@ -52,11 +52,11 @@ static void scrub_str(std::string& s) {
 
 response call(const char* method,
               const char* session_token,
-              const uint8_t* session_key,
+              const uint8_t* rpc_key,
               const char* params_json)
 {
     response r{};
-    if (!method || !session_token || !session_key) {
+    if (!method || !session_token || !rpc_key) {
         r.error = "invalid_args";
         return r;
     }
@@ -82,7 +82,7 @@ response call(const char* method,
     canon.append(params);
 
     uint8_t mac[32]{};
-    bool ok = auth::hmac_sha256(session_key, 32,
+    bool ok = auth::hmac_sha256(rpc_key, 32,
                                 reinterpret_cast<const uint8_t*>(canon.data()),
                                 canon.size(), mac);
     scrub_str(canon);

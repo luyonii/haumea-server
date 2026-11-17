@@ -25,11 +25,14 @@ func HKDF(ikm, salt, info []byte, n int) ([]byte, error) {
 
 // HKDFExpand derives `outLen` bytes from an existing PRK via HKDF-Expand
 // (RFC 5869 §2.3), HMAC-SHA256. Used for session_key -> per-use sub-keys.
-func HKDFExpand(prk, info []byte, outLen int) []byte {
+// Returns an error only when outLen exceeds the RFC limit of 255*HashLen bytes.
+func HKDFExpand(prk, info []byte, outLen int) ([]byte, error) {
 	r := hkdf.Expand(sha256.New, prk, info)
 	out := make([]byte, outLen)
-	io.ReadFull(r, out)
-	return out
+	if _, err := io.ReadFull(r, out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // HMAC256 returns HMAC-SHA256(key, data).

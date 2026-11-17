@@ -100,8 +100,8 @@ func writeErr(w http.ResponseWriter, status int, code, msg string) {
 	writeJSON(w, status, map[string]any{"error": code, "message": msg})
 }
 
-func readJSON(r *http.Request, v any) error {
-	r.Body = http.MaxBytesReader(nil, r.Body, 2<<20) // 2 MiB cap
+func readJSON(w http.ResponseWriter, r *http.Request, v any) error {
+	r.Body = http.MaxBytesReader(w, r.Body, 2<<20) // 2 MiB cap; writes 413 on overflow
 	return json.NewDecoder(r.Body).Decode(v)
 }
 
@@ -154,6 +154,22 @@ func isValidHWID(h string) bool {
 	return true
 }
 
+// isValidRPCMethod guards the canonical "method|token|timestamp|payload" HMAC:
+// a method containing '|' could collide with a different valid tuple.
+func isValidRPCMethod(m string) bool {
+	if len(m) == 0 || len(m) > 64 {
+		return false
+	}
+	for i := 0; i < len(m); i++ {
+		c := m[i]
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+			(c >= '0' && c <= '9') || c == '_' || c == '.') {
+			return false
+		}
+	}
+	return true
+}
+
 // ---- 1. /auth/challenge ----
 
 func (s *Server) handleChallenge(w http.ResponseWriter, r *http.Request) {
@@ -164,7 +180,7 @@ func (s *Server) handleChallenge(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		HWID string `json:"hwid"`
 	}
-	if err := readJSON(r, &req); err != nil || !isValidHWID(req.HWID) {
+	if err := readJSON(w, r, &req); err != nil || !isValidHWID(req.HWID) {
 		writeErr(w, http.StatusBadRequest, "bad_request", "invalid hwid")
 		return
 	}
@@ -205,7 +221,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Challenge         string `json:"challenge"`
 		ChallengeResponse string `json:"challenge_response"`
 	}
-	if err := readJSON(r, &req); err != nil || req.LicenseKey == "" ||
+	if err := readJSON(w, r, &req); err != nil || req.LicenseKey == "" ||
 		len(req.LicenseKey) > 64 ||
 		!isValidHWID(req.HWID) || req.Challenge == "" || req.ChallengeResponse == "" {
 		writeErr(w, http.StatusBadRequest, "bad_request", "missing fields")
@@ -361,7 +377,7 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		Timestamp string `json:"timestamp"`
 		NextNonce string `json:"next_nonce"`
 	}
-	if err := readJSON(r, &req); err != nil ||
+	if err := readJSON(w, r, &req); err != nil ||
 		req.Token == "" || req.HMAC == "" || req.Timestamp == "" || req.NextNonce == "" {
 		writeErr(w, http.StatusBadRequest, "bad_request", "missing fields")
 		return
@@ -412,7 +428,11 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "server_error", "key decode")
 		return
 	}
-	kHeartbeat := crypto.HKDFExpand(sessionKey, infoHeartbeat, 32)
+	kHeartbeat, err := crypto.HKDFExpand(sessionKey, infoHeartbeat, 32)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "server_error", "hkdf")
+		return
+	}
 	expected := crypto.HMAC256(kHeartbeat, []byte(req.Timestamp))
 	got, err := base64.StdEncoding.DecodeString(req.HMAC)
 	if err != nil || !crypto.Equal(got, expected) {
@@ -466,7 +486,7 @@ func (s *Server) handleFetch(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Token string `json:"session_token"`
 	}
-	if err := readJSON(r, &req); err != nil || req.Token == "" {
+	if err := readJSON(w, r, &req); err != nil || req.Token == "" {
 		writeErr(w, http.StatusBadRequest, "bad_request", "missing session_token")
 		return
 	}
@@ -515,7 +535,11 @@ func (s *Server) handleFetch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	kWatermark := crypto.HKDFExpand(sessionKey, infoWatermark, 32)
+	kWatermark, err := crypto.HKDFExpand(sessionKey, infoWatermark, 32)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "server_error", "hkdf")
+		return
+	}
 	wm, err := buildWatermark(sess.HWID, lic.Key, kWatermark)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "server_error", "watermark")
@@ -526,7 +550,11 @@ func (s *Server) handleFetch(w http.ResponseWriter, r *http.Request) {
 	plaintext = append(plaintext, wm...)
 	plaintext = append(plaintext, pe...)
 
-	kPayloadAES := crypto.HKDFExpand(sessionKey, infoPayloadAES, 32)
+	kPayloadAES, err := crypto.HKDFExpand(sessionKey, infoPayloadAES, 32)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "server_error", "hkdf")
+		return
+	}
 	sealed, err := crypto.SealGCM(kPayloadAES, plaintext)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "server_error", "seal")
@@ -554,7 +582,10 @@ func buildWatermark(hwidHex, licenseKey string, watermarkKey []byte) ([]byte, er
 	copy(wm[32:64], lh)
 
 	binary.LittleEndian.PutUint64(wm[64:72], uint64(time.Now().Unix()))
-	binary.LittleEndian.PutUint64(wm[72:80], 86400) // 24 h, never 0
+	// TTL 24h; client enforces it after clock-rollback. Kill flag does NOT
+	// revoke a payload the client already fetched — tighten here once we add
+	// server-side payload revocation and reduce to ~1h to shrink the window.
+	binary.LittleEndian.PutUint64(wm[72:80], 86400)
 
 	nonce, err := crypto.RandBytes(16)
 	if err != nil {
@@ -587,8 +618,9 @@ func (s *Server) handleRPC(w http.ResponseWriter, r *http.Request) {
 		Timestamp string          `json:"timestamp"`
 		HMAC      string          `json:"hmac"`
 	}
-	if err := readJSON(r, &req); err != nil ||
-		req.Method == "" || req.Token == "" || req.Timestamp == "" || req.HMAC == "" {
+	if err := readJSON(w, r, &req); err != nil ||
+		req.Method == "" || req.Token == "" || req.Timestamp == "" || req.HMAC == "" ||
+		!isValidRPCMethod(req.Method) {
 		writeErr(w, http.StatusBadRequest, "bad_request", "missing fields")
 		return
 	}
@@ -643,7 +675,11 @@ func (s *Server) handleRPC(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "server_error", "key")
 		return
 	}
-	kRPC := crypto.HKDFExpand(sessionKey, infoRPC, 32)
+	kRPC, err := crypto.HKDFExpand(sessionKey, infoRPC, 32)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "server_error", "hkdf")
+		return
+	}
 	expected := crypto.HMAC256(kRPC, canon)
 	got, err := base64.StdEncoding.DecodeString(req.HMAC)
 	if err != nil || !crypto.Equal(got, expected) {
