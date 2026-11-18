@@ -8,7 +8,6 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
-	"log"
 	"net/http"
 	"os"
 	"os/signal"
@@ -22,11 +21,19 @@ import (
 	"github.com/secblind/server/internal/store"
 )
 
+type rateRoute struct {
+	RPS   float64 `yaml:"rps"`
+	Burst int     `yaml:"burst"`
+}
+
 type config struct {
 	Listen        string `yaml:"listen"`
+	MetricsAddr   string `yaml:"metrics_addr"` // separate private bind for Prometheus /metrics
+	AdminAddr     string `yaml:"admin_addr"`   // separate private bind for /api/v1/admin/*
+	AdminToken    string `yaml:"admin_token"`  // required to enable admin endpoint; empty = disabled
 	PostgresDSN   string `yaml:"postgres_dsn"`
 	RedisAddr     string `yaml:"redis_addr"`
-	MasterSecret  string `yaml:"master_secret"`   // hex, or "env:NAME"
+	MasterSecret  string `yaml:"master_secret"` // hex, or "env:NAME"
 	SessionTTLS   int    `yaml:"session_ttl_s"`
 	HeartbeatS    int    `yaml:"heartbeat_s"`
 	HWIDCooldownD int    `yaml:"hwid_cooldown_d"`
@@ -35,6 +42,17 @@ type config struct {
 		PerHWIDRPM      int `yaml:"per_hwid_rpm"`
 		PerHWIDRPMFetch int `yaml:"per_hwid_rpm_payload_fetch"`
 	} `yaml:"rate"`
+	// Per-route token-bucket limits; keys match ratelimit.go's routeKeyForPath.
+	RateLimits map[string]rateRoute `yaml:"rate_limits"`
+
+	// Logging — JSON + lumberjack file rotation.
+	LogFile       string `yaml:"log_file"`
+	LogMaxSizeMB  int    `yaml:"log_max_size_mb"`
+	LogMaxBackups int    `yaml:"log_max_backups"`
+	LogMaxAgeDays int    `yaml:"log_max_age_days"`
+	LogCompress   bool   `yaml:"log_compress"`
+	LogDev        bool   `yaml:"log_dev"` // true -> console encoder + debug level
+
 	TrustedProxies []string `yaml:"trusted_proxies"`
 	EnableDebug    bool     `yaml:"enable_debug"`
 	DebugToken     string   `yaml:"debug_token"`
@@ -59,6 +77,14 @@ func resolveSecret(v string) ([]byte, error) {
 	return hex.DecodeString(v)
 }
 
+func toRouteLimits(in map[string]rateRoute) api.RouteLimits {
+	out := api.RouteLimits{}
+	for k, v := range in {
+		out[k] = api.RouteLimit{RPS: v.RPS, Burst: v.Burst}
+	}
+	return out
+}
+
 func main() {
 	path := "config.yaml"
 	if len(os.Args) > 1 {
@@ -66,24 +92,42 @@ func main() {
 	}
 	cfg, err := loadConfig(path)
 	if err != nil {
-		log.Fatalf("config: %v", err)
-	}
-	master, err := resolveSecret(cfg.MasterSecret)
-	if err != nil || len(master) < 32 {
-		log.Fatalf("master_secret must be hex of at least 32 bytes")
+		// No logger yet; stderr is fine.
+		os.Stderr.WriteString("config: " + err.Error() + "\n")
+		os.Exit(1)
 	}
 
-	ctx := context.Background()
+	// Logger first so every subsequent event flows through zap + lumberjack.
+	logger, closeLog := api.InitLogger(api.LogConfig{
+		Dev:        cfg.LogDev,
+		File:       cfg.LogFile,
+		MaxSizeMB:  cfg.LogMaxSizeMB,
+		MaxBackups: cfg.LogMaxBackups,
+		MaxAgeDays: cfg.LogMaxAgeDays,
+		Compress:   cfg.LogCompress,
+	})
+	api.SetLogger(logger)
+	store.Logf = func(format string, args ...any) { logger.Warnf(format, args...) }
+	defer closeLog()
+
+	master, err := resolveSecret(cfg.MasterSecret)
+	if err != nil || len(master) < 32 {
+		logger.Fatal("master_secret must be hex of at least 32 bytes")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	pg, err := store.OpenPG(ctx, cfg.PostgresDSN)
 	if err != nil {
-		log.Fatalf("postgres: %v", err)
+		logger.Fatalf("postgres: %v", err)
 	}
 	defer pg.Close()
 	pingCtx, pingCancel := context.WithTimeout(ctx, 5*time.Second)
 	err = pg.Pool.Ping(pingCtx)
 	pingCancel()
 	if err != nil {
-		log.Fatalf("postgres unreachable: %v", err)
+		logger.Fatalf("postgres unreachable: %v", err)
 	}
 
 	rdb := store.OpenRedis(cfg.RedisAddr)
@@ -103,8 +147,14 @@ func main() {
 	}
 	srv := api.New(pg, rdb, apiCfg)
 
-	mux := http.NewServeMux()
-	srv.Register(mux)
+	// Per-route rate limiter (in-process token bucket).
+	api.SetRouteLimits(toRouteLimits(cfg.RateLimits))
+
+	// Background health polling updates pg_up / redis_up gauges.
+	api.StartHealthPolling(ctx, pg, rdb, 10*time.Second)
+
+	publicMux := http.NewServeMux()
+	srv.Register(publicMux)
 
 	addr := cfg.Listen
 	if addr == "" {
@@ -114,13 +164,54 @@ func main() {
 
 	hs := &http.Server{
 		Addr:              addr,
-		Handler:           mux,
+		Handler:           publicMux,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
 	// shortcut: plain HTTP. Terminate TLS at Nginx. Upgrade when running standalone.
+
+	// Metrics listener (isolated from the public bind).
+	var metricsSrv *http.Server
+	if cfg.MetricsAddr != "" {
+		mmux := http.NewServeMux()
+		mmux.Handle("/metrics", api.MetricsHandler())
+		metricsSrv = &http.Server{
+			Addr:              cfg.MetricsAddr,
+			Handler:           mmux,
+			ReadHeaderTimeout: 5 * time.Second,
+		}
+		go func() {
+			logger.Infow("metrics listening", "addr", cfg.MetricsAddr)
+			if err := metricsSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				logger.Errorf("metrics listen: %v", err)
+			}
+		}()
+	}
+
+	// Admin listener (also private).
+	var adminSrv *http.Server
+	if cfg.AdminAddr != "" && cfg.AdminToken != "" {
+		amux := http.NewServeMux()
+		srv.RegisterAdmin(amux, cfg.AdminToken)
+		adminSrv = &http.Server{
+			Addr:              cfg.AdminAddr,
+			Handler:           amux,
+			ReadHeaderTimeout: 5 * time.Second,
+			ReadTimeout:       15 * time.Second,
+			WriteTimeout:      30 * time.Second,
+		}
+		go func() {
+			logger.Infow("admin listening", "addr", cfg.AdminAddr)
+			if err := adminSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				logger.Errorf("admin listen: %v", err)
+			}
+		}()
+	} else if cfg.AdminAddr != "" || cfg.AdminToken != "" {
+		logger.Warnw("admin endpoint disabled: both admin_addr and admin_token required")
+	}
+
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 
@@ -129,20 +220,23 @@ func main() {
 
 	select {
 	case err := <-errc:
-		// Close pools explicitly so Fatalf-less exit still flushes resources
-		// (defers would run, but Fatalf skips them — close first, then fatal).
 		rdb.Close()
 		pg.Close()
-		log.Fatalf("listen: %v", err)
+		logger.Fatalf("listen: %v", err)
 	case s := <-sig:
-		log.Printf("signal %v: shutting down (30s drain)", s)
+		logger.Infow("signal received: shutting down (30s drain)", "signal", s.String())
 	}
 
-	sctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+	sctx, scancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer scancel()
 	if err := hs.Shutdown(sctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		log.Printf("shutdown: %v", err)
+		logger.Warnf("shutdown: %v", err)
 	}
-	// pg/rdb closed by the defers above, after the drain.
-	log.Printf("bye")
+	if metricsSrv != nil {
+		_ = metricsSrv.Shutdown(sctx)
+	}
+	if adminSrv != nil {
+		_ = adminSrv.Shutdown(sctx)
+	}
+	logger.Info("bye")
 }

@@ -1,0 +1,61 @@
+# CodeQL security scan for C++ (manual build) and Go (autobuild).
+# Runs on push to main, pull requests, and weekly on schedule.
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 6 * * 1'  # Mondays 06:00 UTC
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: cpp
+            os: windows-latest
+            build-mode: manual
+          - language: go
+            os: ubuntu-latest
+            build-mode: autobuild
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+
+      # Manual build for C++: MSBuild on the solution.
+      - name: Setup MSBuild
+        if: matrix.language == 'cpp'
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build C++ (manual)
+        if: matrix.language == 'cpp'
+        shell: pwsh
+        run: msbuild "Project1\Project1.sln" /p:Configuration=Release /p:Platform=x64 /m
+
+      # Go uses autobuild; still need a Go toolchain pinned to go.mod.
+      - name: Setup Go
+        if: matrix.language == 'go'
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: server/go.mod
+          cache-dependency-path: server/go.sum
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: /language:${{ matrix.language }}

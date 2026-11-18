@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"net"
 	"net/http"
 	"strconv"
@@ -95,7 +94,7 @@ func New(pg *store.PG, rdb *store.Redis, cfg Config) *Server {
 	}
 	nets, err := parseTrustedProxies(cfg.TrustedProxies)
 	if err != nil {
-		log.Fatalf("api: trusted_proxies: %v", err)
+		panic(fmt.Sprintf("api: trusted_proxies: %v", err))
 	}
 	trustedProxyNets = nets
 	return &Server{PG: pg, RDB: rdb, Cfg: cfg}
@@ -148,9 +147,12 @@ func (s *Server) Register(mux *http.ServeMux) {
 	reg("/api/v1/rpc/call", s.handleRPC)
 	if s.Cfg.EnableDebug {
 		if s.Cfg.DebugToken == "" {
-			log.Printf("warn: enable_debug=true but debug_token empty; /debug/metrics NOT registered (fail-safe)")
+			L().Warnw("enable_debug=true but debug_token empty; /debug/metrics NOT registered (fail-safe)")
 		} else {
-			reg("/debug/metrics", debugAuth(s.Cfg.DebugToken, metricsHandler))
+			// Debug port exposes the same Prometheus registry as the dedicated
+			// metrics bind, gated by X-Debug-Token. Prefer metrics_addr; this is
+			// a legacy convenience.
+			reg("/debug/metrics", debugAuth(s.Cfg.DebugToken, MetricsHandler().ServeHTTP))
 		}
 	}
 }
@@ -316,6 +318,8 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// otherwise an attacker learns which of license/challenge/HMAC was wrong.
 	failAuth := func(licID *int64, reason string) {
 		s.PG.LogAbuse(ctx, licID, ip, reason)
+		authFailTotal.WithLabelValues(reason).Inc()
+		authLoginTotal.WithLabelValues("fail").Inc()
 		writeErr(w, http.StatusUnauthorized, "invalid_credentials", "")
 	}
 
@@ -374,6 +378,10 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	if killed, _ := s.PG.KillStatus(ctx, lic.ID); killed {
 		failAuth(&lic.ID, "killed")
+		return
+	}
+	if s.isRevoked(ctx, lic.ID) {
+		failAuth(&lic.ID, "revoked")
 		return
 	}
 
@@ -438,6 +446,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = s.RDB.RememberLatestToken(ctx, lic.ID, token, s.Cfg.SessionTTL)
 
+	authLoginTotal.WithLabelValues("success").Inc()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"session_token":      token,
 		"session_key":        sess.SessionKey,
@@ -465,6 +474,7 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad_request", "missing fields")
 		return
 	}
+	heartbeatTotal.Inc()
 	ctx := r.Context()
 
 	sess, err := s.RDB.GetSession(ctx, req.Token)
@@ -524,9 +534,10 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Rotate nonce, renew TTL. Check kill flag.
+	// Rotate nonce, renew TTL. Check kill + revocation.
 	killed, _ := s.PG.KillStatus(ctx, sess.LicenseID)
-	if killed {
+	revoked := s.isRevoked(ctx, sess.LicenseID)
+	if killed || revoked {
 		// Kill: drop session + latest_token, never renew TTL.
 		s.RDB.DeleteSession(ctx, req.Token)
 		s.RDB.KillSessionsFor(ctx, sess.LicenseID)
@@ -534,10 +545,15 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		if len(tp) > 8 {
 			tp = tp[:8]
 		}
-		log.Printf("kill_enforced endpoint=heartbeat token_prefix=%s", tp)
+		L().Infow("kill_enforced",
+			"request_id", RequestID(ctx),
+			"endpoint", "heartbeat",
+			"token_prefix", tp,
+			"revoked", revoked,
+		)
 		writeJSON(w, http.StatusOK, map[string]any{
 			"kill":    true,
-			"revoked": false,
+			"revoked": revoked,
 		})
 		return
 	}
@@ -793,7 +809,13 @@ func (s *Server) handleRPC(w http.ResponseWriter, r *http.Request) {
 	}
 	if !ok {
 		metricInc("rpc_replay_blocked", "/rpc/call")
-		log.Printf("rpc replay blocked token_pfx=%s ts=%s ip=%s", tokPfx, req.Timestamp, clientIP(r))
+		rpcCallsTotal.WithLabelValues(req.Method, "replay").Inc()
+		L().Warnw("rpc_replay_blocked",
+			"request_id", RequestID(ctx),
+			"token_prefix", tokPfx,
+			"ts", req.Timestamp,
+			"ip", clientIP(r),
+		)
 		writeErr(w, http.StatusUnauthorized, "invalid_hmac", "")
 		return
 	}
@@ -801,8 +823,10 @@ func (s *Server) handleRPC(w http.ResponseWriter, r *http.Request) {
 	// Dispatch.
 	switch req.Method {
 	case "ping":
+		rpcCallsTotal.WithLabelValues(req.Method, "ok").Inc()
 		writeJSON(w, http.StatusOK, map[string]any{"pong": true})
 	default:
+		rpcCallsTotal.WithLabelValues(req.Method, "unknown_method").Inc()
 		writeErr(w, http.StatusNotFound, "unknown_method", req.Method)
 	}
 }
@@ -825,6 +849,9 @@ func licenseByID(ctx context.Context, pg *store.PG, id int64) (*store.License, e
 
 // LogStartup prints a small sign-of-life line.
 func (s *Server) LogStartup(addr string) {
-	log.Printf("sec-blind listening on %s (TTL=%s, HB=%ds)",
-		addr, s.Cfg.SessionTTL, s.Cfg.HeartbeatInterval)
+	L().Infow("sec-blind listening",
+		"addr", addr,
+		"session_ttl", s.Cfg.SessionTTL.String(),
+		"heartbeat_s", s.Cfg.HeartbeatInterval,
+	)
 }

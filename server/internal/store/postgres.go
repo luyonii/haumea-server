@@ -3,13 +3,16 @@ package store
 import (
 	"context"
 	"errors"
-	"log"
 	"net"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// Logf is the sink the store package uses for background failures. main.go
+// overrides it with the zap sugar logger; default is a no-op so tests stay quiet.
+var Logf = func(string, ...any) {}
 
 // ErrNotFound is returned when a license or payload does not exist.
 var ErrNotFound = errors.New("not found")
@@ -119,6 +122,27 @@ func (p *PG) LatestPayload(ctx context.Context, licenseID int64) ([]byte, error)
 	return pe, err
 }
 
+// RevokeLicense sets licenses.revoked_at = now() if not already set.
+// Idempotent: a second revoke is a no-op.
+func (p *PG) RevokeLicense(ctx context.Context, licenseID int64) error {
+	_, err := p.Pool.Exec(ctx,
+		`UPDATE licenses SET revoked_at = now()
+		   WHERE id = $1 AND revoked_at IS NULL`, licenseID)
+	return err
+}
+
+// IsRevoked returns true when licenses.revoked_at IS NOT NULL.
+func (p *PG) IsRevoked(ctx context.Context, licenseID int64) (bool, error) {
+	var hasRevoke bool
+	err := p.Pool.QueryRow(ctx,
+		`SELECT revoked_at IS NOT NULL FROM licenses WHERE id = $1`, licenseID,
+	).Scan(&hasRevoke)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	return hasRevoke, err
+}
+
 // KillStatus reports whether the license is killed.
 func (p *PG) KillStatus(ctx context.Context, licenseID int64) (bool, error) {
 	var one int
@@ -144,6 +168,6 @@ func (p *PG) LogAbuse(_ context.Context, licenseID *int64, ip, reason string) {
 	if _, err := p.Pool.Exec(ctx,
 		`INSERT INTO abuse_log (license_id, ip, reason) VALUES ($1, $2, $3)`,
 		licenseID, ipArg, reason); err != nil {
-		log.Printf("abuse log failed: %v", err)
+		Logf("abuse log failed: %v", err)
 	}
 }

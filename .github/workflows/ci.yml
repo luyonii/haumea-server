@@ -1,0 +1,106 @@
+# CI pipeline: build + test on every push and pull request.
+# Three parallel jobs: Windows client build/tests, Go server build/tests, Go static analysis.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+
+  # Windows loader (MSVC x64 Release) + 4 native test exes.
+  build-client:
+    name: Build client (MSVC x64 Release) + tests
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build Sec blind.sln (Release x64)
+        shell: pwsh
+        run: msbuild "Project1\Project1.sln" /p:Configuration=Release /p:Platform=x64 /m
+
+      # Each test must exit 0; any non-zero fails the job.
+      - name: Run pe_loader_fuzzer
+        shell: pwsh
+        run: |
+          & "Project1/x64/Release/pe_loader_fuzzer.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run dynapi_tests
+        shell: pwsh
+        run: |
+          & "tests/dynapi_tests/x64/Release/dynapi_tests.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run anti_tamper_tests
+        shell: pwsh
+        run: |
+          & "tests/anti_tamper_tests/x64/Release/anti_tamper_tests.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run sentinel_tests
+        shell: pwsh
+        run: |
+          & "tests/sentinel_tests/x64/Release/sentinel_tests.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  # Go server build + unit tests.
+  build-server:
+    name: Build + test Go server
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go (from go.mod)
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: server/go.mod
+          cache-dependency-path: server/go.sum
+
+      - name: go build
+        run: go build ./...
+
+      - name: go test
+        run: go test ./...
+
+  # Lint / vet / optional staticcheck on the Go server.
+  static-analysis-server:
+    name: Static analysis (Go)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go (from go.mod)
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: server/go.mod
+          cache-dependency-path: server/go.sum
+
+      - name: go vet
+        working-directory: server
+        run: go vet ./...
+
+      # gofmt -l prints any file that needs formatting; non-empty output = fail.
+      - name: gofmt
+        working-directory: server
+        shell: bash
+        run: |
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then
+            echo "gofmt needs changes in:"
+            echo "$out"
+            exit 1
+          fi
+
+      - name: staticcheck
+        uses: dominikh/staticcheck-action@v1
+        with:
+          working-directory: server
+          install-go: false

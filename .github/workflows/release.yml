@@ -1,0 +1,49 @@
+# Release pipeline: triggered by any tag `v*`.
+# Builds Windows Release x64, zips the loader + test exes, uploads as a GitHub Release asset.
+# NOTE: packer/signing steps (VMProtect, Themida, code signing) are NOT run in CI —
+# they are GUI tools, require licenses, and must be done manually post-release.
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release-windows:
+    name: Build + package Windows release
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build Sec blind.sln (Release x64)
+        shell: pwsh
+        run: msbuild "Project1\Project1.sln" /p:Configuration=Release /p:Platform=x64 /m
+
+      - name: Stage artifacts
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path dist | Out-Null
+          Copy-Item "Project1/x64/Release/Project1.exe" dist/
+          Copy-Item "Project1/x64/Release/pe_loader_fuzzer.exe" dist/
+          Copy-Item "tests/dynapi_tests/x64/Release/dynapi_tests.exe" dist/
+          Copy-Item "tests/anti_tamper_tests/x64/Release/anti_tamper_tests.exe" dist/
+          Copy-Item "tests/sentinel_tests/x64/Release/sentinel_tests.exe" dist/
+
+      - name: Zip
+        shell: pwsh
+        run: Compress-Archive -Path dist/* -DestinationPath "secblind-${{ github.ref_name }}-windows-x64.zip"
+
+      # TODO: post-release manual steps (NOT automated here):
+      #   1. Run VMProtect / Themida GUI on Project1.exe with the production profile.
+      #   2. Sign the packed binary with the code-signing cert.
+      #   3. Re-upload the signed artifact to the release.
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: secblind-${{ github.ref_name }}-windows-x64.zip

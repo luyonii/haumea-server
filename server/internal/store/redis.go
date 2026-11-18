@@ -98,6 +98,25 @@ func (r *Redis) TrySetOnce(ctx context.Context, key string, ttl time.Duration) (
 	return r.C.SetNX(ctx, key, 1, ttl).Result()
 }
 
+// ---- Revocation cache ----
+
+// SetRevoked marks a license revoked for ttl (used as a fast check before DB).
+func (r *Redis) SetRevoked(ctx context.Context, licenseID int64, ttl time.Duration) error {
+	return r.C.Set(ctx, "license:revoked:"+itoa(licenseID), 1, ttl).Err()
+}
+
+// IsRevoked returns true when the revoked flag is present in Redis.
+func (r *Redis) IsRevoked(ctx context.Context, licenseID int64) (bool, error) {
+	_, err := r.C.Get(ctx, "license:revoked:"+itoa(licenseID)).Result()
+	if errors.Is(err, redis.Nil) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // ---- Rate limit ----
 
 // Allow returns true if the per-minute counter under key is under limit. Fixed window.

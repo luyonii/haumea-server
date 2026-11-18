@@ -1,20 +1,49 @@
 listen:          "127.0.0.1:8080"
+# Prometheus /metrics — MUST stay on a private bind (never 0.0.0.0).
+metrics_addr:    "127.0.0.1:9090"
+# Admin endpoint /api/v1/admin/revoke. Both admin_addr and admin_token must be
+# set to enable it; keep on a private bind (127.0.0.1 or VPN/internal CIDR).
+admin_addr:      "127.0.0.1:8443"
+admin_token:     "env:SB_ADMIN_TOKEN"
+
 postgres_dsn:    "postgres://secblind:secblind@localhost:5432/secblind?sslmode=disable"
 redis_addr:      "localhost:6379"
 master_secret:   "env:SB_MASTER_SECRET"   # 64 hex chars (32 bytes) via env var
 session_ttl_s:   900
 heartbeat_s:     60
 hwid_cooldown_d: 30
+
+# Legacy coarse limits (per-minute fixed window, Redis-backed, kept for HWID buckets).
 rate:
   per_ip_rpm:    30
   per_hwid_rpm:  10
+
+# Granular per-route token-bucket (in-process; single-instance deploy).
+# Scaling out horizontally -> switch ratelimit.go to a Redis script.
+rate_limits:
+  auth_challenge: { rps: 10, burst: 20 }
+  auth_login:     { rps: 2,  burst: 5  }
+  heartbeat:      { rps: 5,  burst: 10 }
+  rpc_call:       { rps: 10, burst: 20 }
+  payload_fetch:  { rps: 1,  burst: 3  }
+  admin_revoke:   { rps: 2,  burst: 5  }
+
+# Structured logging (zap) with lumberjack file rotation. log_file empty -> stderr only.
+log_file:           ""
+log_max_size_mb:    100
+log_max_backups:    7
+log_max_age_days:   30
+log_compress:       true
+log_dev:            false   # true -> console encoder + debug level
+
 # IPs/CIDRs of reverse proxies (e.g. nginx) permitted to set X-Forwarded-For.
 # Empty = XFF ignored, RemoteAddr used directly.
 trusted_proxies:
 #  - 127.0.0.1
 #  - 10.0.0.0/8
-# /debug/metrics is off by default. Set enable_debug: true AND debug_token to
-# a random secret to expose it; empty token with enable_debug=true fails safe
-# (route not registered, warning logged). Access with header X-Debug-Token.
+
+# /debug/metrics is off by default. Prefer metrics_addr for Prometheus scrape.
+# When enable_debug: true AND debug_token set, /debug/metrics on the public bind
+# serves the same Prometheus text, gated by X-Debug-Token.
 enable_debug: false
 debug_token:  ""
