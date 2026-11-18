@@ -169,13 +169,12 @@ uint32_t enumerate() {
             size_t wlen = pi->ImageName.Length / sizeof(wchar_t);
             // Strip any path prefix (NT path format safeguard — usually bare basename).
             const wchar_t* w = pi->ImageName.Buffer;
+            size_t start = 0;
             for (size_t j = 0; j < wlen; ++j) {
-                if (w[j] == L'\\' || w[j] == L'/') {
-                    w += j + 1;
-                    wlen -= j + 1;
-                    j = 0;
-                }
+                if (w[j] == L'\\' || w[j] == L'/') start = j + 1;
             }
+            w += start;
+            wlen -= start;
             for (size_t k = 0; k < TABLE_N; ++k) {
                 if (ieq(w, wlen, table[k].name))
                     mask |= table[k].bit;

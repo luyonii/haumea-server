@@ -54,30 +54,41 @@ action scan(report& out) {
     return action::continue_;
 }
 
+static void trip_and_die() {
+    if (s_scrub_cb) s_scrub_cb();
+    heartbeat::stop();
+    terminate_silent();
+}
+
+// No C++ unwindable locals here — required for __try/__except coexistence.
 static DWORD WINAPI monitor_proc(LPVOID) {
-    auto k32 = dynapi::get_module(dynapi::modules::KERNEL32);
-    auto pWait = reinterpret_cast<fn_WaitForSingle>(
-        dynapi::resolve(k32, API_HASH("WaitForSingleObject")));
-    if (!pWait) { s_running.store(false, std::memory_order_release); return 0; }
+    __try {
+        auto k32 = dynapi::get_module(dynapi::modules::KERNEL32);
+        auto pWait = reinterpret_cast<fn_WaitForSingle>(
+            dynapi::resolve(k32, API_HASH("WaitForSingleObject")));
+        if (!pWait) { s_running.store(false, std::memory_order_release); return 0; }
 
-    while (true) {
-        DWORD w = pWait(s_stop_event, 30000);
-        if (w != WAIT_TIMEOUT) break;
+        while (true) {
+            DWORD w = pWait(s_stop_event, 30000);
+            if (w != WAIT_TIMEOUT) break;
 
-        bool trip = false;
-        if (anti_debug::check_all())              trip = true;
-        else if (anti_hook::check_critical_apis()) trip = true;
-        else if (!anti_tamper::verify(s_baseline)) trip = true;
-        else if (!canary::verify_data())           trip = true;
-        else if (!canary::verify_code(s_code_baseline)) trip = true;
-        else if (tool_detect::enumerate())         trip = true;
+            bool trip = false;
+            if (anti_debug::check_all())              trip = true;
+            else if (anti_hook::check_critical_apis()) trip = true;
+            else if (!anti_tamper::verify(s_baseline)) trip = true;
+            else if (!canary::verify_data())           trip = true;
+            else if (!canary::verify_code(s_code_baseline)) trip = true;
+            else if (tool_detect::enumerate())         trip = true;
 
-        if (trip) {
-            if (s_scrub_cb) s_scrub_cb();
-            heartbeat::stop();
-            terminate_silent();
-            break;
+            if (trip) {
+                trip_and_die();
+                break;
+            }
         }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        // Any SEH inside the monitor loop (AV from corrupted headers, illegal
+        // insn, etc.) is treated as tamper — never die silently.
+        trip_and_die();
     }
     s_running.store(false, std::memory_order_release);
     return 0;
@@ -95,6 +106,14 @@ bool start_monitor(uint32_t text_crc_baseline, uint32_t code_canary_baseline) {
 
     s_baseline      = text_crc_baseline;
     s_code_baseline = code_canary_baseline;
+
+    // Pre-flight: validate baselines against the current image before we spawn
+    // the monitor. Catches tamper that happened between baseline capture and
+    // start_monitor (e.g. headers smashed, .text patched). Fail closed.
+    if (!anti_tamper::verify(s_baseline))        return false;
+    if (!canary::verify_code(s_code_baseline))   return false;
+    if (!canary::verify_data())                  return false;
+
     s_stop_event = pCE(nullptr, TRUE, FALSE, nullptr);
     if (!s_stop_event) return false;
 

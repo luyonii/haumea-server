@@ -159,9 +159,13 @@ static bool verify_cert_pin(void* hRequest) {
     pCertFree(cert);
     if (!ok) return false;
 
-    // Integration test cert pin (secblind.local self-signed). Replace before prod.
+    // Integration test cert pin (secblind.local self-signed).
+    // Replace AMBOS no deploy por hashes reais distintos (leaf atual + leaf backup);
+    // mesmo valor nos dois slots = sem rotação segura de cert.
+    // pin_leaf_current — hash do cert de testes `secblind.local` (harness de integração); substituir pelo hash do cert real de prod no deploy
     auto pin1 = OBF("822696bb26c49b6269b46d41457587c112f9b1248c4c5b322604ae66bcdfbdca");
-    auto pin2 = OBF("822696bb26c49b6269b46d41457587c112f9b1248c4c5b322604ae66bcdfbdca");
+    // pin_leaf_backup — substituir no deploy
+    auto pin2 = OBF("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
 
     return strcmp(hash, pin1.c_str()) == 0
         || strcmp(hash, pin2.c_str()) == 0;

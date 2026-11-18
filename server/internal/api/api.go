@@ -10,11 +10,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/secblind/server/internal/store"
@@ -41,7 +43,27 @@ type Config struct {
 	RatePerIP         int
 	RatePerHWID       int
 	RatePerHWIDFetch  int // per-HWID limit for /payload/fetch (heavier)
+	// TrustedProxies: CIDRs or single IPs allowed to set X-Forwarded-For.
+	// Empty = never trust XFF (clientIP returns RemoteAddr always).
+	TrustedProxies []string
+
+	// EnableDebug gates /debug/metrics registration. Default false.
+	EnableDebug bool
+	// DebugToken, when EnableDebug=true, is required in X-Debug-Token
+	// (constant-time compare). Empty + EnableDebug=true fails safe:
+	// route is NOT registered, startup logs a warning.
+	DebugToken string
 }
+
+// authSink absorbs discarded HMAC results so the compiler cannot elide the
+// HKDF+HMAC that /auth/login performs before the license lookup (timing
+// side-channel defense). Package-level, never read.
+var authSink atomic.Pointer[[]byte]
+
+// trustedProxyNets is the parsed TrustedProxies list. Set once by New(); read
+// only by clientIP. Package-level so middleware.go's observe() can call clientIP
+// without threading the Server through.
+var trustedProxyNets []*net.IPNet
 
 type Server struct {
 	PG  *store.PG
@@ -71,7 +93,47 @@ func New(pg *store.PG, rdb *store.Redis, cfg Config) *Server {
 	if cfg.RatePerHWIDFetch == 0 {
 		cfg.RatePerHWIDFetch = 6
 	}
+	nets, err := parseTrustedProxies(cfg.TrustedProxies)
+	if err != nil {
+		log.Fatalf("api: trusted_proxies: %v", err)
+	}
+	trustedProxyNets = nets
 	return &Server{PG: pg, RDB: rdb, Cfg: cfg}
+}
+
+// parseTrustedProxies accepts CIDR notation ("10.0.0.0/8") or single IPs
+// ("127.0.0.1"); single IPs are promoted to /32 or /128.
+func parseTrustedProxies(entries []string) ([]*net.IPNet, error) {
+	out := make([]*net.IPNet, 0, len(entries))
+	for _, e := range entries {
+		e = strings.TrimSpace(e)
+		if e == "" {
+			continue
+		}
+		if _, n, err := net.ParseCIDR(e); err == nil {
+			out = append(out, n)
+			continue
+		}
+		ip := net.ParseIP(e)
+		if ip == nil {
+			return nil, fmt.Errorf("bad entry %q", e)
+		}
+		bits := 32
+		if ip.To4() == nil {
+			bits = 128
+		}
+		out = append(out, &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)})
+	}
+	return out, nil
+}
+
+func isTrustedProxy(ip net.IP) bool {
+	for _, n := range trustedProxyNets {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 // Register wires the 5 endpoints to a mux.
@@ -84,8 +146,13 @@ func (s *Server) Register(mux *http.ServeMux) {
 	reg("/api/v1/session/heartbeat", s.handleHeartbeat)
 	reg("/api/v1/payload/fetch", s.handleFetch)
 	reg("/api/v1/rpc/call", s.handleRPC)
-	// TODO: protect by bind-address or token; today it answers on any iface the server binds.
-	reg("/debug/metrics", metricsHandler)
+	if s.Cfg.EnableDebug {
+		if s.Cfg.DebugToken == "" {
+			log.Printf("warn: enable_debug=true but debug_token empty; /debug/metrics NOT registered (fail-safe)")
+		} else {
+			reg("/debug/metrics", debugAuth(s.Cfg.DebugToken, metricsHandler))
+		}
+	}
 }
 
 // ---- Helpers ----
@@ -105,16 +172,24 @@ func readJSON(w http.ResponseWriter, r *http.Request, v any) error {
 	return json.NewDecoder(r.Body).Decode(v)
 }
 
+// clientIP returns the caller IP as a string. X-Forwarded-For is honored only
+// when RemoteAddr is itself in the trusted-proxy list; the last XFF entry (the
+// hop closest to the trusted proxy, not spoofable by the external client) is
+// used. On any mismatch or parse failure, falls back to RemoteAddr.
 func clientIP(r *http.Request) string {
-	if xf := r.Header.Get("X-Forwarded-For"); xf != "" {
-		if i := strings.IndexByte(xf, ','); i >= 0 {
-			return strings.TrimSpace(xf[:i])
-		}
-		return strings.TrimSpace(xf)
-	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
-		return r.RemoteAddr
+		host = r.RemoteAddr
+	}
+	remote := net.ParseIP(host)
+	if remote != nil && isTrustedProxy(remote) {
+		if xf := r.Header.Get("X-Forwarded-For"); xf != "" {
+			parts := strings.Split(xf, ",")
+			cand := strings.TrimSpace(parts[len(parts)-1])
+			if ip := net.ParseIP(cand); ip != nil {
+				return ip.String()
+			}
+		}
 	}
 	return host
 }
@@ -262,27 +337,10 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 2) license exists and not banned
-	lic, err := s.PG.LicenseByKey(ctx, req.LicenseKey)
-	if errors.Is(err, store.ErrNotFound) {
-		failAuth(nil, "unknown_license")
-		return
-	}
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "server_error", "db")
-		return
-	}
-	if lic.Banned {
-		failAuth(&lic.ID, "banned")
-		return
-	}
-	if killed, _ := s.PG.KillStatus(ctx, lic.ID); killed {
-		failAuth(&lic.ID, "killed")
-		return
-	}
-
-	// 3) derive key EXACTLY like the client (auth.cpp):
-	//    salt = hwid_bytes || "SecBlind_HKDF_v1" ; info = empty
+	// Timing-side-channel defense: derive HKDF+HMAC BEFORE the license lookup
+	// so the unknown_license path pays the same crypto cost as the full path.
+	// expected is sunk via authSink below on every unknown path to keep the
+	// compiler from eliding the work.
 	salt := make([]byte, 0, len(req.HWID)+len(crypto.HKDFSalt))
 	salt = append(salt, []byte(req.HWID)...)
 	salt = append(salt, crypto.HKDFSalt...)
@@ -291,9 +349,34 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "server_error", "hkdf")
 		return
 	}
-
-	// 4) expected = HMAC-SHA256(derived, nonce)
 	expected := crypto.HMAC256(derived, nonce)
+
+	// license exists and not banned
+	lic, err := s.PG.LicenseByKey(ctx, req.LicenseKey)
+	if errors.Is(err, store.ErrNotFound) {
+		b := expected // prevent elision of HKDF+HMAC above
+		authSink.Store(&b)
+		// timing balance: pay KillStatus cost on unknown_license so attacker
+		// cannot distinguish it from the bad_challenge_response / killed paths.
+		_, _ = s.PG.KillStatus(ctx, 0)
+		failAuth(nil, "unknown_license")
+		return
+	}
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "server_error", "db")
+		return
+	}
+	if lic.Banned {
+		// timing balance: match KillStatus cost of the killed/bad_resp paths.
+		_, _ = s.PG.KillStatus(ctx, lic.ID)
+		failAuth(&lic.ID, "banned")
+		return
+	}
+	if killed, _ := s.PG.KillStatus(ctx, lic.ID); killed {
+		failAuth(&lic.ID, "killed")
+		return
+	}
+
 	gotMAC, err := base64.StdEncoding.DecodeString(req.ChallengeResponse)
 	if err != nil || !crypto.Equal(gotMAC, expected) {
 		failAuth(&lic.ID, "bad_challenge_response")
@@ -509,19 +592,25 @@ func (s *Server) handleFetch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Uniform message across all 403 paths: a differing `message` leaks
+	// "killed" vs "no payload" vs "banned" to a token holder (admin oracle).
+	// Real reason is preserved in abuse_log via LogAbuse.
 	lic, err := licenseByID(ctx, s.PG, sess.LicenseID)
 	if err != nil {
+		s.PG.LogAbuse(ctx, &sess.LicenseID, clientIP(r), "fetch_license_lookup")
 		writeErr(w, http.StatusForbidden, "not_authorized", "")
 		return
 	}
 	if killed, _ := s.PG.KillStatus(ctx, sess.LicenseID); killed {
-		writeErr(w, http.StatusForbidden, "not_authorized", "killed")
+		s.PG.LogAbuse(ctx, &sess.LicenseID, clientIP(r), "fetch_killed")
+		writeErr(w, http.StatusForbidden, "not_authorized", "")
 		return
 	}
 
 	pe, err := s.PG.LatestPayload(ctx, sess.LicenseID)
 	if errors.Is(err, store.ErrNotFound) {
-		writeErr(w, http.StatusForbidden, "not_authorized", "no payload")
+		s.PG.LogAbuse(ctx, &sess.LicenseID, clientIP(r), "fetch_no_payload")
+		writeErr(w, http.StatusForbidden, "not_authorized", "")
 		return
 	}
 	if err != nil {
@@ -693,7 +782,10 @@ func (s *Server) handleRPC(w http.ResponseWriter, r *http.Request) {
 	if len(tokPfx) > 8 {
 		tokPfx = tokPfx[:8]
 	}
-	nonceKey := "rpc_nonce:" + tokPfx + ":" + req.Timestamp
+	// Key uses sha256(token)[:16] (128 bits) to avoid cross-session collisions
+	// a raw 32-bit prefix would allow (birthday at ~2^16 live sessions → DoS).
+	tokHash := sha256.Sum256([]byte(req.Token))
+	nonceKey := "rpc_nonce:" + hex.EncodeToString(tokHash[:16]) + ":" + req.Timestamp
 	ok, err := s.RDB.TrySetOnce(ctx, nonceKey, 2*s.Cfg.TimestampSkew)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "server_error", "redis")

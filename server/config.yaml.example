@@ -8,3 +8,13 @@ hwid_cooldown_d: 30
 rate:
   per_ip_rpm:    30
   per_hwid_rpm:  10
+# IPs/CIDRs of reverse proxies (e.g. nginx) permitted to set X-Forwarded-For.
+# Empty = XFF ignored, RemoteAddr used directly.
+trusted_proxies:
+#  - 127.0.0.1
+#  - 10.0.0.0/8
+# /debug/metrics is off by default. Set enable_debug: true AND debug_token to
+# a random secret to expose it; empty token with enable_debug=true fails safe
+# (route not registered, warning logged). Access with header X-Debug-Token.
+enable_debug: false
+debug_token:  ""

@@ -206,6 +206,215 @@ static vector<uint8_t> build_oversized_image() {
     return b;
 }
 
+// ---- Audit fix cases (12) --------------------------------------------------
+
+// 1) e_lfanew is a signed LONG; a negative value would wrap to a huge size_t
+// when cast. Fix: reject dos->e_lfanew < 0 before any arithmetic.
+static vector<uint8_t> build_e_lfanew_negative() {
+    auto b = build_valid_skeleton();
+    dos_at(b)->e_lfanew = static_cast<LONG>(0x80000000); // sign bit set -> negative
+    return b;
+}
+
+// 2) NumberOfSections == 0 is rejected (PE must have at least one section
+// for the loader to do useful work; was previously unbounded on the low end).
+static vector<uint8_t> build_sections_zero() {
+    auto b = build_valid_skeleton();
+    nt_at(b)->FileHeader.NumberOfSections = 0;
+    return b;
+}
+
+// 3) NumberOfSections > 96 is rejected (PE spec maximum).
+static vector<uint8_t> build_sections_above_cap() {
+    auto b = build_valid_skeleton();
+    nt_at(b)->FileHeader.NumberOfSections = 100;
+    return b;
+}
+
+// 4) SizeOfHeaders must cover the section table (e_lfanew + sizeof(NT64) + N*sec hdr).
+// Setting it below that bound is rejected so the section-header walk cannot
+// read past the headers region.
+static vector<uint8_t> build_size_of_headers_small_for_sections() {
+    auto b = build_valid_skeleton();
+    // Required: 64 + 264 + 1*40 = 368. Picking 200 is clearly below it
+    // while still > sizeof(DOS)+sizeof(NT64) so earlier checks don't fire.
+    nt_at(b)->OptionalHeader.SizeOfHeaders = 200;
+    return b;
+}
+
+// 12) e_lfanew + sizeof(NT64) must not overrun pe_size. Picking a value just
+// below FILE_SIZE exercises the arithmetic bound (not the "way out of range"
+// path already covered by lfanew_out_of_bounds).
+static vector<uint8_t> build_e_lfanew_plus_nt_overflow() {
+    auto b = build_valid_skeleton();
+    // 1020 + 264 = 1284 > 1024
+    dos_at(b)->e_lfanew = static_cast<LONG>(FILE_SIZE - 4);
+    return b;
+}
+
+// 9) Section whose VirtualAddress + Misc.VirtualSize > image_size must not
+// let VirtualProtect flip pages past the allocation. SRD=0 skips the section
+// copy so we land specifically in the protect-step bounds check.
+static vector<uint8_t> build_virtual_protect_section_overflow() {
+    auto b = build_valid_skeleton();
+    auto* s = sec0(b);
+    s->SizeOfRawData    = 0;       // skip memcpy / section_copy checks
+    s->VirtualAddress   = 0x1000;
+    s->Misc.VirtualSize = 0x2000;  // VA + VS = 0x3000 > SizeOfImage 0x2000
+    return b;
+}
+
+// 10) VirtualSize alone > image_size is rejected in the protect step.
+static vector<uint8_t> build_virtual_size_overflow() {
+    auto b = build_valid_skeleton();
+    auto* s = sec0(b);
+    s->SizeOfRawData    = 0;
+    s->VirtualAddress   = 0x1000;
+    s->Misc.VirtualSize = 0x3000;  // > SizeOfImage 0x2000 on its own
+    return b;
+}
+
+// 11) VirtualAddress > image_size is rejected in the section copy loop
+// (SRD > 0 so the copy path, not the protect path, triggers).
+static vector<uint8_t> build_section_va_above_image() {
+    auto b = build_valid_skeleton();
+    auto* s = sec0(b);
+    s->VirtualAddress   = 0x3000;      // > SizeOfImage 0x2000
+    s->Misc.VirtualSize = SECT_VIRT_SIZE;
+    s->SizeOfRawData    = SECT_RAW_SIZE;
+    s->PointerToRawData = SECT_RAW_OFFSET;
+    return b;
+}
+
+// 5) IMPORT data directory VirtualAddress + Size overruns the image.
+static vector<uint8_t> build_import_desc_overflow_dir() {
+    auto b = build_valid_skeleton();
+    auto& dd = nt_at(b)->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    dd.VirtualAddress = SECT_VA;      // valid start
+    dd.Size           = SIZE_OF_IMAGE; // VA + Size = 0x3000 > SizeOfImage
+    return b;
+}
+
+// 6) Import descriptor's thunk RVA lies at/past image_size.
+// Needs a valid desc->Name so the thunk bound check is what fails.
+static vector<uint8_t> build_import_thunk_overflow_image() {
+    auto b = build_valid_skeleton();
+    auto& dd = nt_at(b)->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    dd.VirtualAddress = SECT_VA;
+    dd.Size           = sizeof(IMAGE_IMPORT_DESCRIPTOR) * 2;
+
+    uint8_t* base = b.data() + SECT_RAW_OFFSET;
+    auto*    desc = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(base);
+    desc[0].OriginalFirstThunk = SIZE_OF_IMAGE; // >= image_size -> rejected
+    desc[0].FirstThunk         = SECT_VA + 56;  // valid, but check fires on OFT
+    desc[0].Name               = SECT_VA + 40;  // valid "kernel32.dll\0" below
+    // desc[1] zero terminator.
+    // load_module() must succeed so we reach the thunk bound check; using a
+    // real DLL ensures load_module("kernel32.dll") returns non-null.
+    memcpy(base + 40, "kernel32.dll\0", 13);
+    return b;
+}
+
+// ---- Larger-section skeleton (for the string-NUL cases) --------------------
+// The 1 KiB skeleton can't stage 512 non-NUL bytes in mapped memory (section
+// raw data is only 512 bytes and VirtualAlloc pages are zero-filled). Grow
+// the file so safe_strnlen actually scans 512 non-NUL bytes.
+
+static constexpr uint32_t BIG_FILE_SIZE       = 4096;
+static constexpr uint32_t BIG_SECT_RAW_OFFSET = 512;
+static constexpr uint32_t BIG_SECT_RAW_SIZE   = 3584; // 4096 - 512
+static constexpr uint32_t BIG_SECT_VIRT_SIZE  = 0x1000;
+
+static vector<uint8_t> build_big_section_skeleton() {
+    vector<uint8_t> buf(BIG_FILE_SIZE, 0);
+
+    auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(buf.data());
+    dos->e_magic  = IMAGE_DOS_SIGNATURE;
+    dos->e_lfanew = static_cast<LONG>(NT_OFFSET);
+
+    auto* nt = reinterpret_cast<IMAGE_NT_HEADERS64*>(buf.data() + NT_OFFSET);
+    nt->Signature                       = IMAGE_NT_SIGNATURE;
+    nt->FileHeader.Machine              = IMAGE_FILE_MACHINE_AMD64;
+    nt->FileHeader.NumberOfSections     = 1;
+    nt->FileHeader.SizeOfOptionalHeader = sizeof(IMAGE_OPTIONAL_HEADER64);
+    nt->FileHeader.Characteristics      = IMAGE_FILE_EXECUTABLE_IMAGE;
+
+    auto& oh = nt->OptionalHeader;
+    oh.Magic                       = IMAGE_NT_OPTIONAL_HDR64_MAGIC;
+    oh.AddressOfEntryPoint         = SECT_VA;
+    oh.ImageBase                   = IMAGE_BASE_LOW;
+    oh.SectionAlignment            = 0x1000;
+    oh.FileAlignment               = 0x200;
+    oh.MajorOperatingSystemVersion = 6;
+    oh.MajorSubsystemVersion       = 6;
+    oh.SizeOfImage                 = SIZE_OF_IMAGE;
+    oh.SizeOfHeaders               = SIZE_OF_HEADERS;
+    oh.Subsystem                   = IMAGE_SUBSYSTEM_WINDOWS_CUI;
+    oh.NumberOfRvaAndSizes         = IMAGE_NUMBEROF_DIRECTORY_ENTRIES;
+
+    auto* sec = IMAGE_FIRST_SECTION(nt);
+    memcpy(sec->Name, ".text\0\0\0", 8);
+    sec->Misc.VirtualSize = BIG_SECT_VIRT_SIZE;
+    sec->VirtualAddress   = SECT_VA;
+    sec->SizeOfRawData    = BIG_SECT_RAW_SIZE;
+    sec->PointerToRawData = BIG_SECT_RAW_OFFSET;
+    sec->Characteristics  = IMAGE_SCN_CNT_CODE | IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_EXECUTE;
+
+    return buf;
+}
+
+// 7) desc->Name points at >=512 non-NUL bytes with no terminator -> safe_strnlen
+// returns SIZE_MAX and resolve_imports bails out.
+static vector<uint8_t> build_import_name_no_null() {
+    auto b = build_big_section_skeleton();
+    auto& dd = nt_at(b)->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    dd.VirtualAddress = SECT_VA;
+    dd.Size           = sizeof(IMAGE_IMPORT_DESCRIPTOR) * 2;
+
+    uint8_t* base = b.data() + BIG_SECT_RAW_OFFSET;
+    auto*    desc = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(base);
+    desc[0].OriginalFirstThunk = SECT_VA + 40; // valid thunks (never reached)
+    desc[0].FirstThunk         = SECT_VA + 56;
+    desc[0].Name               = SECT_VA + 100; // 512-byte non-NUL run below
+
+    // Fill [100 .. 100+512) with non-NUL bytes.
+    memset(base + 100, 'A', 512);
+    return b;
+}
+
+// 8) IMAGE_IMPORT_BY_NAME.Name is a >=512 non-NUL run with no terminator.
+static vector<uint8_t> build_import_by_name_no_null() {
+    auto b = build_big_section_skeleton();
+    auto& dd = nt_at(b)->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    dd.VirtualAddress = SECT_VA;
+    dd.Size           = sizeof(IMAGE_IMPORT_DESCRIPTOR) * 2;
+
+    uint8_t* base = b.data() + BIG_SECT_RAW_OFFSET;
+    auto*    desc = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(base);
+    desc[0].OriginalFirstThunk = SECT_VA + 40;
+    desc[0].FirstThunk         = SECT_VA + 56;
+    desc[0].Name               = SECT_VA + 72; // valid "kernel32.dll\0"
+
+    memcpy(base + 72, "kernel32.dll\0", 13);
+
+    // Thunks point to an IMAGE_IMPORT_BY_NAME at offset 200. Hint is 2 bytes,
+    // then the Name buffer: fill the Name run with 512 non-NUL bytes.
+    const uint32_t by_name_offset = 200;
+    auto* oft = reinterpret_cast<ULONGLONG*>(base + 40);
+    oft[0] = SECT_VA + by_name_offset; // non-ordinal -> treated as name RVA
+    oft[1] = 0;
+    auto* ft = reinterpret_cast<ULONGLONG*>(base + 56);
+    ft[0] = SECT_VA + by_name_offset;
+    ft[1] = 0;
+
+    // IMAGE_IMPORT_BY_NAME: WORD Hint; CHAR Name[1];
+    // Zero Hint (2 bytes), then non-NUL Name from offset 202 for 512 bytes.
+    base[by_name_offset + 0] = 0;
+    base[by_name_offset + 1] = 0;
+    memset(base + by_name_offset + 2, 'A', 512);
+    return b;
+}
+
 // ---- Harness ---------------------------------------------------------------
 
 struct test_case {
@@ -233,6 +442,20 @@ int main() {
         {"section_ptr_overflow",  pe_loader::map_error::section_copy_failed, &build_section_ptr_overflow},
         {"ordinal_import",        pe_loader::map_error::import_failed,       &build_ordinal_import},
         {"oversized_image",       pe_loader::map_error::alloc_failed,        &build_oversized_image},
+
+        // Cases exercising today's audit fixes (one per fix).
+        {"e_lfanew_negative",                   pe_loader::map_error::bad_nt_header,       &build_e_lfanew_negative},
+        {"number_of_sections_zero",             pe_loader::map_error::bad_nt_header,       &build_sections_zero},
+        {"number_of_sections_above_cap",        pe_loader::map_error::bad_nt_header,       &build_sections_above_cap},
+        {"size_of_headers_too_small_for_sections", pe_loader::map_error::bad_nt_header,    &build_size_of_headers_small_for_sections},
+        {"e_lfanew_plus_nt_overflow",           pe_loader::map_error::bad_nt_header,       &build_e_lfanew_plus_nt_overflow},
+        {"import_desc_overflow_dir",            pe_loader::map_error::import_failed,       &build_import_desc_overflow_dir},
+        {"import_thunk_overflow_image",         pe_loader::map_error::import_failed,       &build_import_thunk_overflow_image},
+        {"import_name_no_null_terminator",      pe_loader::map_error::import_failed,       &build_import_name_no_null},
+        {"import_by_name_no_null_terminator",   pe_loader::map_error::import_failed,       &build_import_by_name_no_null},
+        {"virtual_protect_section_overflow",    pe_loader::map_error::protect_failed,      &build_virtual_protect_section_overflow},
+        {"virtual_size_overflow",               pe_loader::map_error::protect_failed,      &build_virtual_size_overflow},
+        {"section_va_above_image",              pe_loader::map_error::section_copy_failed, &build_section_va_above_image},
     };
 
     const int total = static_cast<int>(sizeof(cases) / sizeof(*cases));

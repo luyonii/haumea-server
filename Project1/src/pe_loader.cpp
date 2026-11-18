@@ -1,6 +1,7 @@
 #include "pe_loader.h"
 #include "dynapi.h"
 #include "obfstr.h"
+#include "pe_bounds.h"
 
 #include <Windows.h>
 #include <cstring>
@@ -115,27 +116,49 @@ static bool resolve_imports(uint8_t* base, IMAGE_NT_HEADERS64* nt) {
         (uint64_t)dir.VirtualAddress + dir.Size > image_size)
         return false;
 
-    auto desc = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(base + dir.VirtualAddress);
+    constexpr size_t kMaxName = 512;
 
-    for (; desc->Name != 0; ++desc) {
+    auto desc = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(base + dir.VirtualAddress);
+    const uint8_t* desc_end   = base + dir.VirtualAddress + dir.Size;
+    const uint8_t* image_end  = base + image_size;
+
+    // Cap descriptor walk by the IMPORT data directory itself.
+    for (; (const uint8_t*)desc + sizeof(IMAGE_IMPORT_DESCRIPTOR) <= desc_end
+           && desc->Name != 0; ++desc) {
+        if (desc->Name >= image_size) return false;
         auto mod_name = reinterpret_cast<const char*>(base + desc->Name);
+        if (pe_bounds::safe_strnlen(mod_name, base, (size_t)image_size, kMaxName) == SIZE_MAX)
+            return false;
         auto mod = dynapi::load_module(mod_name);
         if (!mod) return false;
 
-        auto orig_thunk = desc->OriginalFirstThunk
-            ? reinterpret_cast<IMAGE_THUNK_DATA64*>(base + desc->OriginalFirstThunk)
-            : reinterpret_cast<IMAGE_THUNK_DATA64*>(base + desc->FirstThunk);
-        auto iat_thunk  = reinterpret_cast<IMAGE_THUNK_DATA64*>(base + desc->FirstThunk);
+        uint32_t thunk_rva = desc->OriginalFirstThunk ? desc->OriginalFirstThunk
+                                                      : desc->FirstThunk;
+        uint32_t iat_rva   = desc->FirstThunk;
+        if (thunk_rva == 0 || iat_rva == 0) return false;
+        if (thunk_rva >= image_size || iat_rva >= image_size) return false;
 
-        for (; orig_thunk->u1.AddressOfData != 0; ++orig_thunk, ++iat_thunk) {
+        auto orig_thunk = reinterpret_cast<IMAGE_THUNK_DATA64*>(base + thunk_rva);
+        auto iat_thunk  = reinterpret_cast<IMAGE_THUNK_DATA64*>(base + iat_rva);
+
+        // Thunks live in .idata/.rdata — cap by SizeOfImage (upper bound).
+        for (; (const uint8_t*)orig_thunk + sizeof(IMAGE_THUNK_DATA64) <= image_end
+               && (const uint8_t*)iat_thunk  + sizeof(IMAGE_THUNK_DATA64) <= image_end
+               && orig_thunk->u1.AddressOfData != 0;
+             ++orig_thunk, ++iat_thunk) {
             if (orig_thunk->u1.Ordinal & IMAGE_ORDINAL_FLAG64) {
                 // TODO: ordinal import support (walk export table by ordinal).
                 return false;
             }
 
-            auto by_name = reinterpret_cast<IMAGE_IMPORT_BY_NAME*>(
-                base + orig_thunk->u1.AddressOfData);
-            auto fn = dynapi::resolve(mod, hash_name_runtime(reinterpret_cast<const char*>(by_name->Name)));
+            uint64_t name_rva = orig_thunk->u1.AddressOfData;
+            if (name_rva >= image_size || name_rva + sizeof(IMAGE_IMPORT_BY_NAME) > image_size) return false;
+            auto by_name = reinterpret_cast<IMAGE_IMPORT_BY_NAME*>(base + name_rva);
+            if (pe_bounds::safe_strnlen(reinterpret_cast<const char*>(by_name->Name),
+                                        base, (size_t)image_size, kMaxName) == SIZE_MAX)
+                return false;
+            auto fn = dynapi::resolve(mod, hash_name_runtime(
+                reinterpret_cast<const char*>(by_name->Name)));
             if (!fn) return false;
 
             iat_thunk->u1.Function = reinterpret_cast<uint64_t>(fn);
@@ -154,6 +177,9 @@ map_error map(const uint8_t* pe_bytes, size_t pe_size, mapped_image& out) {
     auto dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(pe_bytes);
     if (dos->e_magic != IMAGE_DOS_SIGNATURE) return map_error::bad_dos_header;
 
+    // e_lfanew is a signed LONG — a negative value would wrap to a huge size_t
+    // on cast. Reject it before any arithmetic.
+    if (dos->e_lfanew < 0) return map_error::bad_nt_header;
     if (static_cast<size_t>(dos->e_lfanew) + sizeof(IMAGE_NT_HEADERS64) > pe_size)
         return map_error::bad_nt_header;
 
@@ -165,6 +191,26 @@ map_error map(const uint8_t* pe_bytes, size_t pe_size, mapped_image& out) {
 
     if (nt_src->FileHeader.SizeOfOptionalHeader != sizeof(IMAGE_OPTIONAL_HEADER64))
         return map_error::bad_nt_header;
+
+    // PE spec: SectionAlignment must be >= page size (0x1000) for loadable images.
+    if (nt_src->OptionalHeader.SectionAlignment < 0x1000)
+        return map_error::bad_nt_header;
+
+    // Cap NumberOfSections and make sure the section table fits inside
+    // SizeOfHeaders (and inside the file). PE spec max is 96 sections.
+    if (nt_src->FileHeader.NumberOfSections == 0 ||
+        nt_src->FileHeader.NumberOfSections > 96)
+        return map_error::bad_nt_header;
+    {
+        size_t section_table_end =
+            static_cast<size_t>(dos->e_lfanew)
+            + sizeof(IMAGE_NT_HEADERS64)
+            + static_cast<size_t>(nt_src->FileHeader.NumberOfSections)
+              * sizeof(IMAGE_SECTION_HEADER);
+        if (section_table_end > pe_size ||
+            nt_src->OptionalHeader.SizeOfHeaders < section_table_end)
+            return map_error::bad_nt_header;
+    }
 
     // Sanity cap: reject implausibly large SizeOfImage before touching the
     // allocator. Real payloads fit well under 256 MiB; this blocks resource
@@ -225,6 +271,15 @@ map_error map(const uint8_t* pe_bytes, size_t pe_size, mapped_image& out) {
     // Apply per-section page protections.
     for (uint16_t i = 0; i < nt_dst->FileHeader.NumberOfSections; ++i) {
         if (sec[i].Misc.VirtualSize == 0) continue;
+        // Bound each section against the mapped image before calling
+        // VirtualProtect — a crafted VirtualSize/VirtualAddress must not let
+        // us flip protections past the allocation.
+        if (sec[i].VirtualAddress > image_size ||
+            sec[i].Misc.VirtualSize > image_size ||
+            (uint64_t)sec[i].VirtualAddress + sec[i].Misc.VirtualSize > image_size) {
+            pVirtualFree(base, 0, MEM_RELEASE);
+            return map_error::protect_failed;
+        }
         DWORD prot = protect_from_characteristics(sec[i].Characteristics);
         DWORD old  = 0;
         if (!pVirtualProtect(base + sec[i].VirtualAddress,

@@ -61,7 +61,9 @@ static void* find_module_peb(uint32_t target_hash) {
 
     auto head = reinterpret_cast<LIST_ENTRY*>(ldr + 0x20);
 
+    size_t steps = 0;
     for (auto curr = head->Flink; curr != head; curr = curr->Flink) {
+        if (++steps > 256) return nullptr;  // defensive: corrupted/looped Ldr list
         auto base_ptr = reinterpret_cast<uint8_t*>(curr);
         auto name_len = *reinterpret_cast<uint16_t*>(base_ptr + 0x48);
         auto name_buf = *reinterpret_cast<wchar_t**>(base_ptr + 0x50);
@@ -78,7 +80,10 @@ static void* find_module_peb(uint32_t target_hash) {
 // PE export table walk
 // ---------------------------------------------------------------------------
 
-static void* walk_exports(void* base, uint32_t func_hash) {
+static void* walk_exports(void* base, uint32_t func_hash, int depth = 0) {
+    // Guard A→B→A forwarder loops. 8 hops is far past any real Windows chain.
+    if (depth >= 8) return nullptr;
+
     auto mod = static_cast<uint8_t*>(base);
 
     auto dos = reinterpret_cast<IMAGE_DOS_HEADER*>(mod);
@@ -92,16 +97,35 @@ static void* walk_exports(void* base, uint32_t func_hash) {
 
     const uint32_t export_dir_rva  = dir.VirtualAddress;
     const uint32_t export_dir_size = dir.Size;
+    const uint32_t image_size      = nt->OptionalHeader.SizeOfImage;
 
     auto exp = reinterpret_cast<IMAGE_EXPORT_DIRECTORY*>(mod + export_dir_rva);
+
+    // Validate the three parallel arrays fit inside the loaded image.
+    if ((uint64_t)exp->AddressOfNames        + (uint64_t)exp->NumberOfNames     * sizeof(uint32_t) > image_size) return nullptr;
+    if ((uint64_t)exp->AddressOfNameOrdinals + (uint64_t)exp->NumberOfNames     * sizeof(uint16_t) > image_size) return nullptr;
+    if ((uint64_t)exp->AddressOfFunctions    + (uint64_t)exp->NumberOfFunctions * sizeof(uint32_t) > image_size) return nullptr;
+
     auto names     = reinterpret_cast<uint32_t*>(mod + exp->AddressOfNames);
     auto ordinals  = reinterpret_cast<uint16_t*>(mod + exp->AddressOfNameOrdinals);
     auto functions = reinterpret_cast<uint32_t*>(mod + exp->AddressOfFunctions);
 
     for (uint32_t i = 0; i < exp->NumberOfNames; ++i) {
-        auto name = reinterpret_cast<const char*>(mod + names[i]);
+        // Name RVA must land inside the loaded image; strings may live outside
+        // the export directory on packers/exotic compilers.
+        uint32_t name_rva = names[i];
+        if (name_rva >= image_size) continue;
+
+        auto name = reinterpret_cast<const char*>(mod + name_rva);
         if (hash_api(name) == func_hash) {
-            uint32_t rva = functions[ordinals[i]];
+            // Ordinal must index within the functions array.
+            uint16_t ord = ordinals[i];
+            if (ord >= exp->NumberOfFunctions) continue;
+
+            uint32_t rva = functions[ord];
+            // Function RVA must land inside the loaded image.
+            if (rva == 0 || rva >= image_size) continue;
+
             if (rva >= export_dir_rva && rva < export_dir_rva + export_dir_size) {
                 // Forwarder string: "ModuleName.FunctionName".
                 const char* fwd = reinterpret_cast<const char*>(mod + rva);
@@ -124,7 +148,7 @@ static void* walk_exports(void* base, uint32_t func_hash) {
                 void* tgt = dynapi::get_module(dynapi::hash_module_runtime(modname));
                 if (!tgt) tgt = dynapi::load_module(modname);
                 if (!tgt) return nullptr;
-                return walk_exports(tgt, hash_api(fn));
+                return walk_exports(tgt, hash_api(fn), depth + 1);
             }
             return mod + rva;
         }

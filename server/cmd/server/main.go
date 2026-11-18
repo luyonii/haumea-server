@@ -35,6 +35,9 @@ type config struct {
 		PerHWIDRPM      int `yaml:"per_hwid_rpm"`
 		PerHWIDRPMFetch int `yaml:"per_hwid_rpm_payload_fetch"`
 	} `yaml:"rate"`
+	TrustedProxies []string `yaml:"trusted_proxies"`
+	EnableDebug    bool     `yaml:"enable_debug"`
+	DebugToken     string   `yaml:"debug_token"`
 }
 
 func loadConfig(path string) (*config, error) {
@@ -94,6 +97,9 @@ func main() {
 		RatePerIP:         cfg.Rate.PerIPRPM,
 		RatePerHWID:       cfg.Rate.PerHWIDRPM,
 		RatePerHWIDFetch:  cfg.Rate.PerHWIDRPMFetch,
+		TrustedProxies:    cfg.TrustedProxies,
+		EnableDebug:       cfg.EnableDebug,
+		DebugToken:        cfg.DebugToken,
 	}
 	srv := api.New(pg, rdb, apiCfg)
 

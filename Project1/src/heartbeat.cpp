@@ -8,7 +8,6 @@
 
 #include <Windows.h>
 #include <atomic>
-#include <ctime>
 #include <string>
 #include <cstring>
 
@@ -39,6 +38,20 @@ static fn_WaitForSingle pWaitFor;
 static fn_CreateThread  pCreateThread;
 static fn_CloseHandle   pCloseHandle;
 
+// Current unix seconds via kernel32!GetSystemTimeAsFileTime (dynapi, zero-IAT).
+static uint64_t now_unix() {
+    using fn_GSTAFT = void(WINAPI*)(LPFILETIME);
+    auto pGS = reinterpret_cast<fn_GSTAFT>(
+        dynapi::resolve(dynapi::modules::KERNEL32, API_HASH("GetSystemTimeAsFileTime")));
+    if (!pGS) return 0;
+    FILETIME ft{};
+    pGS(&ft);
+    uint64_t ft100 = (static_cast<uint64_t>(ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
+    // FILETIME is 100-ns since 1601-01-01; unix epoch offset = 116444736000000000.
+    if (ft100 < 116444736000000000ULL) return 0;
+    return (ft100 - 116444736000000000ULL) / 10000000ULL;
+}
+
 // ---- Thread ----
 
 static DWORD WINAPI thread_proc(LPVOID) {
@@ -48,7 +61,7 @@ static DWORD WINAPI thread_proc(LPVOID) {
         DWORD w = pWaitFor(s_stop_event, static_cast<DWORD>(s_interval) * 1000);
         if (w != WAIT_TIMEOUT) break; // stop signaled
 
-        auto ts = std::to_string(static_cast<int64_t>(time(nullptr)));
+        auto ts = std::to_string(static_cast<int64_t>(now_unix()));
 
         // HMAC-SHA256(key=session_key, data=timestamp)
         uint8_t hmac[32]{};
@@ -123,6 +136,8 @@ bool start(const char* session_token, const uint8_t* session_key,
 
     s_token    = session_token;
     memcpy(s_key, session_key, 32);
+    // clamp defensivo em Release (pareia com auth.cpp)
+    if (interval_seconds < 10 || interval_seconds > 3600) interval_seconds = 60;
     s_interval = interval_seconds;
     s_nonce    = initial_nonce_b64;
     s_reason.store(stop_reason::requested, std::memory_order_release);

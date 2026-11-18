@@ -3,6 +3,8 @@ package store
 import (
 	"context"
 	"errors"
+	"log"
+	"net"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -134,7 +136,14 @@ func (p *PG) LogAbuse(_ context.Context, licenseID *int64, ip, reason string) {
 	// Fire and forget; a logging failure must not break auth.
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	_, _ = p.Pool.Exec(ctx,
-		`INSERT INTO abuse_log (license_id, ip, reason) VALUES ($1, NULLIF($2,'')::inet, $3)`,
-		licenseID, ip, reason)
+	// Invalid/empty ip (e.g. spoofed X-Forwarded-For) -> NULL; a bad ::inet cast would fail the INSERT and evade audit.
+	var ipArg any
+	if parsed := net.ParseIP(ip); parsed != nil {
+		ipArg = parsed.String()
+	}
+	if _, err := p.Pool.Exec(ctx,
+		`INSERT INTO abuse_log (license_id, ip, reason) VALUES ($1, $2, $3)`,
+		licenseID, ipArg, reason); err != nil {
+		log.Printf("abuse log failed: %v", err)
+	}
 }

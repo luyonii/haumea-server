@@ -26,10 +26,21 @@ uint32_t text_section_crc32() {
     auto nt = reinterpret_cast<IMAGE_NT_HEADERS64*>(mod + dos->e_lfanew);
     if (nt->Signature != IMAGE_NT_SIGNATURE) return SENTINEL_NOT_FOUND;
 
+    // Guard NumberOfSections and section-table bounds. Two tampered bytes in
+    // FileHeader could otherwise force OOB section-header reads and crash scan.
+    const WORD num_sections = nt->FileHeader.NumberOfSections;
+    if (num_sections == 0 || num_sections > 96) return SENTINEL_NOT_FOUND;
+    const DWORD sec_tbl_off = dos->e_lfanew
+        + static_cast<DWORD>(FIELD_OFFSET(IMAGE_NT_HEADERS64, OptionalHeader))
+        + nt->FileHeader.SizeOfOptionalHeader;
+    const DWORD sec_tbl_end = sec_tbl_off + num_sections * sizeof(IMAGE_SECTION_HEADER);
+    if (sec_tbl_end < sec_tbl_off) return SENTINEL_NOT_FOUND; // overflow
+    if (sec_tbl_end > nt->OptionalHeader.SizeOfHeaders) return SENTINEL_NOT_FOUND;
+
     // Pass 1: match section name ".text".
     auto sec = IMAGE_FIRST_SECTION(nt);
     auto tag = OBF(".text");
-    for (WORD i = 0; i < nt->FileHeader.NumberOfSections; ++i, ++sec) {
+    for (WORD i = 0; i < num_sections; ++i, ++sec) {
         bool eq = true;
         for (int k = 0; k < 5; ++k)
             if (sec->Name[k] != static_cast<BYTE>(tag.c_str()[k])) { eq = false; break; }
@@ -43,7 +54,7 @@ uint32_t text_section_crc32() {
     // Pass 2: fall back to first executable code section (renamed-section case).
     const DWORD exec_mask = IMAGE_SCN_CNT_CODE | IMAGE_SCN_MEM_EXECUTE;
     sec = IMAGE_FIRST_SECTION(nt);
-    for (WORD i = 0; i < nt->FileHeader.NumberOfSections; ++i, ++sec) {
+    for (WORD i = 0; i < num_sections; ++i, ++sec) {
         if ((sec->Characteristics & exec_mask) == exec_mask) {
             auto base = mod + sec->VirtualAddress;
             auto len  = sec->Misc.VirtualSize;

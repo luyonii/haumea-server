@@ -1,6 +1,7 @@
 package api
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -9,6 +10,20 @@ import (
 	"sync/atomic"
 	"time"
 )
+
+// debugAuth gates a handler on X-Debug-Token (constant-time compare).
+// Registered only when cfg.EnableDebug=true and cfg.DebugToken!="" (see Register).
+func debugAuth(token string, h http.HandlerFunc) http.HandlerFunc {
+	tb := []byte(token)
+	return func(w http.ResponseWriter, r *http.Request) {
+		got := []byte(r.Header.Get("X-Debug-Token"))
+		if len(got) != len(tb) || subtle.ConstantTimeCompare(got, tb) != 1 {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		h(w, r)
+	}
+}
 
 // Structured access log, alongside the existing `log` calls elsewhere.
 var accessLog = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -34,7 +49,8 @@ func metricInc(name, endpoint string) {
 }
 
 func metricsHandler(w http.ResponseWriter, r *http.Request) {
-	// shortcut: no auth. Bind to 127.0.0.1 in production or front with a token.
+	// Auth is enforced by debugAuth wrapper + Register gate (enable_debug +
+	// debug_token). This handler assumes caller already passed that check.
 	countersMu.Lock()
 	out := make(map[string]uint64, len(counters))
 	for k, v := range counters {

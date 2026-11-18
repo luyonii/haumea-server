@@ -17,11 +17,15 @@ constexpr uint32_t hash_api(const char* str) {
 }
 
 // FNV-1a hash for module names. Simulates case-insensitive wide-char hashing
-// from a lowercase ASCII string so compile-time values match the PEB walk at runtime.
+// by lower-casing A-Z and injecting the high byte of wchar_t (0 for ASCII).
+// Convergence: hash_module(compile-time) and hash_module_runtime(runtime)
+// always hash the same byte sequence regardless of input case.
 constexpr uint32_t hash_module(const char* str) {
     uint32_t h = 2166136261u;
     while (*str) {
-        h ^= static_cast<uint8_t>(*str++);
+        uint8_t c = static_cast<uint8_t>(*str++);
+        if (c >= 'A' && c <= 'Z') c |= 0x20;  // force lowercase ASCII
+        h ^= c;
         h *= 16777619u;
         h ^= 0u;               // high byte of wchar_t is 0 for ASCII
         h *= 16777619u;

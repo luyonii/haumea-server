@@ -215,8 +215,9 @@ auth_result authenticate(const std::string& license_key, const std::string& hwid
     auto sk_b64 = json::get_string(resp.body, "session_key");
     auto prk = base64::decode(sk_b64);   // session_key PRK, 32 bytes
     result.session.ttl           = static_cast<int>(json::get_int(resp.body, "ttl", 900));
-    result.session.heartbeat_interval =
-        static_cast<int>(json::get_int(resp.body, "heartbeat_interval", 60));
+    auto hb = json::get_int(resp.body, "heartbeat_interval", 60);
+    // clamp defensivo: servidor malicioso/bug não pode zerar ou inverter o intervalo
+    result.session.heartbeat_interval = (hb < 10 || hb > 3600) ? 60 : static_cast<int>(hb);
     result.session.next_nonce    = json::get_string(resp.body, "next_nonce");
 
     if (result.session.session_token.empty() || prk.size() != 32) {

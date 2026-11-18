@@ -9,17 +9,34 @@
 
 namespace json {
 
+// Returns index of the value for `key` at object depth 1 (root object), or npos.
+// Skips string contents (honouring \" and \\) and nested {} / [].
+inline size_t find_value(const std::string& j, const char* key) {
+    const std::string k = key;
+    auto ws = [&](size_t p) {
+        while (p < j.size() && (j[p] == ' ' || j[p] == '\t' || j[p] == '\n' || j[p] == '\r')) ++p;
+        return p;
+    };
+    int depth = 0;
+    for (size_t i = 0; i < j.size(); ++i) {
+        char c = j[i];
+        if (c == '{' || c == '[') ++depth;
+        else if (c == '}' || c == ']') --depth;
+        else if (c == '"') {
+            size_t s = ++i;
+            while (i < j.size() && j[i] != '"') { if (j[i] == '\\') ++i; ++i; }
+            if (depth == 1 && i - s == k.size() && j.compare(s, k.size(), k) == 0) {
+                size_t p = ws(i + 1);
+                if (p < j.size() && j[p] == ':') return ws(p + 1);
+            }
+        }
+    }
+    return std::string::npos;
+}
+
 inline std::string get_string(const std::string& j, const char* key) {
-    std::string needle = "\"";
-    needle += key;
-    needle += "\"";
-    auto pos = j.find(needle);
+    auto pos = find_value(j, key);
     if (pos == std::string::npos) return {};
-    pos = j.find(':', pos + needle.size());
-    if (pos == std::string::npos) return {};
-    ++pos;
-    while (pos < j.size() && (j[pos] == ' ' || j[pos] == '\t' || j[pos] == '\n' || j[pos] == '\r'))
-        ++pos;
     if (pos >= j.size() || j[pos] != '"') return {};
     ++pos;
     std::string r;
@@ -44,15 +61,8 @@ inline std::string get_string(const std::string& j, const char* key) {
 }
 
 inline int64_t get_int(const std::string& j, const char* key, int64_t def = 0) {
-    std::string needle = "\"";
-    needle += key;
-    needle += "\"";
-    auto pos = j.find(needle);
+    auto pos = find_value(j, key);
     if (pos == std::string::npos) return def;
-    pos = j.find(':', pos + needle.size());
-    if (pos == std::string::npos) return def;
-    ++pos;
-    while (pos < j.size() && (j[pos] == ' ' || j[pos] == '\t')) ++pos;
     bool neg = false;
     if (pos < j.size() && j[pos] == '-') { neg = true; ++pos; }
     if (pos >= j.size() || j[pos] < '0' || j[pos] > '9') return def;
@@ -65,18 +75,16 @@ inline int64_t get_int(const std::string& j, const char* key, int64_t def = 0) {
 }
 
 inline bool get_bool(const std::string& j, const char* key, bool def = false) {
-    std::string needle = "\"";
-    needle += key;
-    needle += "\"";
-    auto pos = j.find(needle);
+    auto pos = find_value(j, key);
     if (pos == std::string::npos) return def;
-    pos = j.find(':', pos + needle.size());
-    if (pos == std::string::npos) return def;
-    ++pos;
-    while (pos < j.size() && (j[pos] == ' ' || j[pos] == '\t')) ++pos;
-    if (pos + 3 < j.size() && j[pos] == 't' && j[pos+1] == 'r' && j[pos+2] == 'u' && j[pos+3] == 'e')
+    auto term = [&](size_t p) {
+        if (p >= j.size()) return true;
+        char c = j[p];
+        return c == ',' || c == '}' || c == ']' || c == ' ' || c == '\t' || c == '\n' || c == '\r';
+    };
+    if (pos + 3 < j.size() && j[pos] == 't' && j[pos+1] == 'r' && j[pos+2] == 'u' && j[pos+3] == 'e' && term(pos+4))
         return true;
-    if (pos + 4 < j.size() && j[pos] == 'f' && j[pos+1] == 'a' && j[pos+2] == 'l' && j[pos+3] == 's' && j[pos+4] == 'e')
+    if (pos + 4 < j.size() && j[pos] == 'f' && j[pos+1] == 'a' && j[pos+2] == 'l' && j[pos+3] == 's' && j[pos+4] == 'e' && term(pos+5))
         return false;
     return def;
 }
