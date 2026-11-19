@@ -1,32 +1,32 @@
 # ABUSE — Playbook
 
-## Fontes
+## Sources
 
-- Tabela `abuse_log` em Postgres: `(id, license_id, ip, reason, ts)`.
-- Reasons observadas em `server/internal/api/api.go`:
-  - `fetch_license_lookup` — sessão aponta para license inexistente.
-  - `fetch_killed` — kill flag ativo, cliente tentou fetch.
-  - `fetch_no_payload` — payload ausente na fase de fetch.
-  - `hwid_cooldown` — HWID diferente do registrado dentro da janela de cooldown.
-  - (prefixo `failAuth`) demais reasons autenticação: `unknown_license`, `banned`, `bad_hmac`, `nonce_replay`, `rate_limit_exceeded`, `hwid_mismatch`.
-- Full list: `grep -n LogAbuse server/internal/api/api.go` para auditoria.
+- `abuse_log` table in Postgres: `(id, license_id, ip, reason, ts)`.
+- Reasons observed in `server/internal/api/api.go`:
+  - `fetch_license_lookup` — session points at a license that doesn't exist.
+  - `fetch_killed` — kill flag active, client tried to fetch.
+  - `fetch_no_payload` — entitled module missing at fetch time.
+  - `hwid_cooldown` — HWID different from the registered one inside the cooldown window.
+  - (prefix `failAuth`) other authentication reasons: `unknown_license`, `banned`, `bad_hmac`, `nonce_replay`, `rate_limit_exceeded`, `hwid_mismatch`.
+- Full list: `grep -n LogAbuse server/internal/api/api.go` for audit.
 
 ## Triage
 
-### Automática (script `auto_ban.sh`)
-- Janela 10min, agregar por IP.
-- Threshold IP: > 50 eventos distintos → iptables DROP + log em `/var/log/secblind/autoban.log`.
-- Threshold license: > 20 fails/hora → marca `needs_review` em tabela adjunta (ou dispara alerta se tabela não existe).
-- Duração do ban: 24h (unban via cron). Reinfrações: ban permanente após 3 ocorrências.
+### Automatic (script `auto_ban.sh`)
+- 10 min window, aggregate by IP.
+- IP threshold: > 50 distinct events → iptables DROP + log in `/var/log/secblind/autoban.log`.
+- License threshold: > 20 fails/hour → marks `needs_review` in an adjacent table (or fires an alert if the table doesn't exist).
+- Ban duration: 24 h (unban via cron). Reinfringement: permanent ban after 3 occurrences.
 
 ### Manual
-- HWID flip-flop: mesma `license_id` com `hwid_mismatch` recorrente de IPs diferentes → sharing/crack. Revogar.
-- Burst de `bad_hmac`: tentativa de key brute-force ou cliente desatualizado. Investigar versão.
-- `nonce_replay` em volume: replay attack ativo. P1.
+- HWID flip-flop: same `license_id` with recurring `hwid_mismatch` from different IPs → sharing/crack. Revoke.
+- `bad_hmac` burst: key brute-force attempt or outdated client. Investigate version.
+- `nonce_replay` in volume: active replay attempt. P1.
 
-## Revogação
+## Entitlement revocation
 
-**Endpoint** (assumido): `POST /api/v1/admin/revoke`
+**Endpoint** (assumed): `POST /api/v1/admin/revoke`
 Body: `{"license_id": 1234, "reason": "sharing"}`
 Auth: header `Authorization: Bearer <ADMIN_TOKEN>`.
 
@@ -38,9 +38,9 @@ curl -X POST https://api.secblind.example/api/v1/admin/revoke \
   --data '{"license_id": 1234, "reason": "hwid_flipflop"}'
 ```
 
-## Evidence package (antes de revogar)
+## Evidence package (before revoking)
 
-Query SQL:
+SQL query:
 ```sql
 SELECT id, license_id, ip, reason, ts
 FROM abuse_log
@@ -49,9 +49,9 @@ ORDER BY ts DESC
 LIMIT 100;
 ```
 
-Export JSON + salvar em `/var/log/secblind/evidence/<license_id>-<ts>.json`. Retenção 1 ano, read-only.
+Export JSON + save in `/var/log/secblind/evidence/<license_id>-<ts>.json`. 1-year retention, read-only.
 
-Query por IP (ban):
+Query by IP (ban):
 ```sql
 SELECT license_id, reason, count(*) AS n
 FROM abuse_log
@@ -62,23 +62,23 @@ ORDER BY n DESC;
 
 ## SLA
 
-| Severidade | Gatilho | Response |
+| Severity | Trigger | Response |
 |---|---|---|
-| HIGH | Replay attack ativo, mass bad_hmac, leak confirmado | < 1h |
-| MED | Suspeita de sharing (HWID flip), burst isolado | < 24h |
-| LOW | Fail isolado, falha de rate limit aparente | < 7d |
+| HIGH | Active replay, mass bad_hmac, confirmed leak | < 1h |
+| MED | Sharing suspicion (HWID flip), isolated burst | < 24h |
+| LOW | Isolated fail, apparent rate-limit miss | < 7d |
 
-## Fluxo
+## Flow
 
 1. Alert fired → acknowledge.
-2. Pull evidence (SQL acima + nginx logs se disponível).
-3. Classificar severidade.
-4. Decisão: ban IP (temp/perm), revogar license, ou monitorar.
-5. Executar: `auto_ban.sh --apply` ou curl `/admin/revoke`.
-6. Pós-ação: evidence salvo, ticket criado, post-mortem se HIGH.
+2. Pull evidence (SQL above + nginx logs if available).
+3. Classify severity.
+4. Decision: ban IP (temp/perm), revoke license, or monitor.
+5. Execute: `auto_ban.sh --apply` or curl `/admin/revoke`.
+6. Post-action: evidence saved, ticket created, post-mortem if HIGH.
 
-## Riscos cobertos manualmente
-- `/admin/revoke` ainda não implementado — confirmar com dev antes de confiar no fluxo em produção.
-- IP ban via iptables não persiste reboot — usar `iptables-save` + `netfilter-persistent` ou nftables com arquivo.
-- Falso positivo: CGNAT/NAT grande pode acumular eventos de usuários legítimos. Threshold calibrar após 30d de dados.
-- Logs de evidence contêm IP + license_id → PII, cuidar com acesso.
+## Risks handled manually
+- `/admin/revoke` is not implemented yet — confirm with dev before relying on the flow in production.
+- IP ban via iptables doesn't persist across reboot — use `iptables-save` + `netfilter-persistent` or nftables with a file.
+- False positive: CGNAT/large NAT can accumulate events from legitimate users. Calibrate the threshold after 30 d of data.
+- Evidence logs carry IP + license_id → PII, mind access.

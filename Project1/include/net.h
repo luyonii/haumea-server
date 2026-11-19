@@ -1,6 +1,7 @@
 #pragma once
-// HTTPS client via WinHTTP with TLS 1.3 and certificate pinning.
-// All WinHTTP APIs resolved dynamically — no IAT entries for winhttp.dll.
+// HTTPS client built on WinHTTP (TLS 1.3) with a TLS certificate fingerprint
+// check against a hardcoded leaf SHA-256. All WinHTTP APIs are bound at
+// runtime via the symbol resolver (lazy-symbol-binder build policy).
 
 #include <string>
 #include <cstdint>

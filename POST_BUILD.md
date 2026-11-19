@@ -32,7 +32,7 @@ Functions to protect:
 
 VMProtect options:
 
-- Debugger presence check: **import on** (user-mode).
+- Debugger-presence check: **import on** (user-mode).
 - Check integrity: **on**.
 - Memory protection: **on**.
 - VMProtect license system: **off** (we run our own).
@@ -45,7 +45,7 @@ VMProtect options:
 Only after VMProtect has run. Use the bundle output as Themida input.
 
 - Memory image protection: **on** (both on-disk and in-memory).
-- Virtualization environment check: **off** (handled by `anti_vm`).
+- Environment integrity check: **off** (handled by `anti_vm`).
 - Delphi/VB detection: **off**.
 - Encrypt resources: **on**.
 - Themida license system: **off**.

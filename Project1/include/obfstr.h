@@ -1,5 +1,5 @@
 #pragma once
-// Compile-time string obfuscation. XOR per-byte key derived from a per-string seed.
+// Compile-time string protection. XOR per-byte key derived from a per-string seed.
 // Decrypts on stack, zeros on destruction.
 
 #include <cstddef>

@@ -1,5 +1,6 @@
 #pragma once
-// Hardware ID: NVMe serial + SMBIOS UUID + CPUID -> SHA-256 via Windows CNG.
+// Device fingerprint id: NVMe serial + SMBIOS UUID + CPUID -> SHA-256 via
+// Windows CNG. Used to bind an activation code to one machine.
 
 #include <cstdint>
 #include <string>

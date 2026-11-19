@@ -1,10 +1,10 @@
 # Server review
 
-Code-review log for the Go license-server implementation. Client source
-is shipped and authoritative; server must match it byte-for-byte.
-Reviewed against SERVER_SPEC.md, server/PLAN.md, and the five
-crypto-critical client files (`auth.cpp`, `crypto.cpp`, `watermark.cpp`,
-`heartbeat.cpp`, `rpc.cpp`, `payload.cpp`).
+Code-review log for the Go license-server implementation. The client
+source is shipped and authoritative; the server must match it
+byte-for-byte. Reviewed against SERVER_SPEC.md, server/PLAN.md, and the
+five crypto-critical client files (`auth.cpp`, `crypto.cpp`,
+`watermark.cpp`, `heartbeat.cpp`, `rpc.cpp`, `payload.cpp`).
 
 ## Confirmed-correct deviations from `SERVER_PLAN.md`
 
@@ -22,7 +22,7 @@ Both are driven by the shipped client. The server is correct, the doc is wrong.
 | Item | Client | Server | OK |
 |---|---|---|---|
 | HKDF salt/info at `/auth/login` | `hwid \|\| "SecBlind_HKDF_v1"` / empty | same | ✅ |
-| Challenge response | `HMAC(derived, base64_decode(challenge))` | same | ✅ |
+| Nonce-based auth response | `HMAC(derived, base64_decode(challenge))` | same | ✅ |
 | Session key info | derivation uses raw 32-B HWID | `sessionIDRaw \|\| hwidHashBytes` from `hex.DecodeString` | ✅ |
 | Session-binding layout | `[0..32)` raw hwid, `[32..64)` SHA256(key), `[64..72)` u64 LE issued_at, `[72..80)` u64 LE ttl, `[80..96)` 16B nonce, `[96..128)` HMAC | same, `ttl=86400` (non-zero) | ✅ |
 | AES-256-GCM | 12 B IV, 16 B tag | same | ✅ |
@@ -39,14 +39,14 @@ Both are driven by the shipped client. The server is correct, the doc is wrong.
 
 - **H1 — `/auth/login` does not check revocation status**
   `internal/api/api.go:194-208`. A license in `license_kill` can still log in and
-  receive a valid session + payload. Only the next heartbeat would return
+  receive a valid session + entitled module. Only the next heartbeat would return
   `kill=true`, leaving a window where `/payload/fetch` and `/rpc/call` work.
   **Fix**: after the `Banned` check, call `s.PG.KillStatus` and return `banned`
   if revoked.
 
 - **H2 — `/payload/fetch` does not check revocation status**
   `internal/api/api.go:434-450`. Same gap at fetch time: a revocation issued after
-  login still serves one payload. **Fix**: add `KillStatus` check between
+  login still serves one module. **Fix**: add `KillStatus` check between
   `GetSession` and `LatestPayload`, return `not_authorized`.
 
 ### MED
@@ -54,7 +54,7 @@ Both are driven by the shipped client. The server is correct, the doc is wrong.
 - **M1 — `TakeChallenge` is GET+DEL, not atomic**
   `internal/store/redis.go:28-39`. Two concurrent `/auth/login` for the same HWID
   race: both can read the nonce before either deletes. Documented as
-  shortcut but trivial to fix with `GETDEL` (go-redis v9 supports it).
+  a shortcut but trivial to fix with `GETDEL` (go-redis v9 supports it).
   **Fix**: `r.C.GetDel(ctx, key)`.
 
 - **M2 — `LogAbuse` uses the (possibly cancelled) request context**
@@ -65,7 +65,7 @@ Both are driven by the shipped client. The server is correct, the doc is wrong.
 
 - **M3 — No length cap on `license_key`**
   `internal/api/api.go:180-183`. `readJSON` caps the body at 2 MiB, so a
-  misbehaving caller can send a 2 MB license key that becomes HKDF IKM every
+  misbehaving caller can send a 2 MB activation code that becomes HKDF IKM every
   attempt — amplified work for the server. **Fix**: enforce
   `len(req.LicenseKey) <= 64` (client format is `XXXXX-XXXXX-XXXXX-XXXXX`
   = 23 chars; 64 is generous).
@@ -97,8 +97,8 @@ Both are driven by the shipped client. The server is correct, the doc is wrong.
   already know. Skipped per ponytail.
 
 - **L4 — License-lookup timing leak**
-  PG query happens before challenge verification, so valid vs invalid license
-  keys are time-distinguishable. Mitigation (dummy HKDF) is non-trivial.
+  PG query happens before challenge verification, so valid vs invalid activation
+  codes are time-distinguishable. Mitigation (dummy HKDF) is non-trivial.
   Documented, not fixed.
 
 ---
@@ -121,6 +121,6 @@ Both are driven by the shipped client. The server is correct, the doc is wrong.
   keeps this small.
 - **L1 — FIXED.** Removed dead `sessionID` hex string and its placeholder
   assignment.
-- **L2 — SKIPPED.** Not a one-liner once import graph is touched; harmless.
+- **L2 — SKIPPED.** Not a one-liner once the import graph is touched; harmless.
 - **L3 — SKIPPED.** The caller already owns the session being hammered.
 - **L4 — SKIPPED.** Non-trivial; documented as a known limitation.

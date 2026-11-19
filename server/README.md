@@ -37,7 +37,7 @@ $env:SB_MASTER_SECRET = -join ((1..32) | ForEach-Object { '{0:x2}' -f (Get-Rando
 
 ```powershell
 psql -U secblind -d secblind -c "INSERT INTO licenses (license_key) VALUES ('TEST-1234-5678-ABCD');"
-# Later, upload the licensed binary for that license (replace with your build):
+# Later, upload the licensed binary for that activation code (replace with your build):
 psql -U secblind -d secblind -c "INSERT INTO payload_builds (license_id, pe_bytes) VALUES ((SELECT id FROM licenses WHERE license_key='TEST-1234-5678-ABCD'), pg_read_binary_file('C:/path/to/payload.dll'));"
 ```
 
@@ -48,8 +48,8 @@ psql -U secblind -d secblind -c "INSERT INTO payload_builds (license_id, pe_byte
 ```
 
 Listens plain HTTP on the address in `config.yaml`. Terminate TLS 1.3 at
-Nginx and reverse-proxy to this port. The client is pinned to the leaf
-cert's SHA-256; see `Project1\src\net.cpp`.
+Nginx and reverse-proxy to this port. The client pins the leaf cert
+SHA-256; see `Project1\src\net.cpp`.
 
 ## Tests
 

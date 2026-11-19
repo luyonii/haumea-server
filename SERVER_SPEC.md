@@ -1,9 +1,9 @@
-# Commercial License Server API Specification (Fase 2)
+# Commercial License Server API Specification (Phase 2)
 
 Base URL: `https://<host>/api/v1`  
 Transport: TLS 1.3 only.
 
-REST API para o servidor de licenciamento do produto comercial. Todos os endpoints servem o cliente first-party do fornecedor.
+REST API for the licensing server of the commercial product. Every endpoint serves the vendor's first-party client.
 
 ---
 
@@ -41,11 +41,11 @@ Request a time-limited nonce before login.
 
 ## POST /auth/login
 
-Authenticate with license key + HWID + solved challenge.
+Authenticate with activation code + device fingerprint id + solved nonce.
 
 The `challenge_response` field is `HMAC-SHA256(nonce, derived_key)` where  
 `derived_key = HKDF-SHA256(ikm=license_key, salt=hwid_hex_bytes || "SecBlind_HKDF_v1", info=<empty>)`.
-Salt é o HWID hex (64 bytes ASCII) concatenado ao literal fixo `"SecBlind_HKDF_v1"` (16 bytes). `info` vazio. Não existe `session_salt` per-license.
+Salt is the HWID hex (64 ASCII bytes) concatenated to the fixed literal `"SecBlind_HKDF_v1"` (16 bytes). `info` empty. There is no per-license `session_salt`.
 
 ### Request
 
@@ -92,7 +92,7 @@ Salt é o HWID hex (64 bytes ASCII) concatenado ao literal fixo `"SecBlind_HKDF_
 
 ## POST /session/heartbeat
 
-Keep session alive. Must be sent every `heartbeat_interval` seconds.
+Keep the session alive. Must be sent every `heartbeat_interval` seconds.
 
 The `hmac` field is `HMAC-SHA256(key=session_key, data=timestamp)`.
 `next_nonce` is the nonce received from the previous response (login or last heartbeat).
@@ -120,7 +120,7 @@ All base64 fields (`hmac`, `next_nonce`) use standard RFC 4648 padding
 }
 ```
 
-When `kill` is `true`, the client must terminate the licensed binary and exit (remote disable / license revocation).
+When `kill` is `true`, the client must terminate the licensed binary and exit (remote license suspension).
 When `revoked` is `true`, the session is no longer valid.
 
 ### Response 401
@@ -152,8 +152,8 @@ enterprise clients.
 
 ### Response 200
 
-JSON envelope carrying the AES-256-GCM encrypted payload. All three
-fields are base64-encoded with standard RFC 4648 padding (`=`). The
+JSON envelope carrying the AES-256-GCM encrypted entitled module. All
+three fields are base64-encoded with standard RFC 4648 padding (`=`). The
 ciphertext is decrypted with the `session_key` returned by `/auth/login`.
 
 ```json
@@ -233,8 +233,8 @@ any non-200 as failure and does not consume the body.
 ## Notes
 
 - Session key derivation: `HKDF(master_secret, session_id || hwid_hash)`.
-- Maximum 1 active session per license key; new login kills previous.
+- Maximum 1 active session per license key; a new login terminates the previous.
 - First login with a new HWID triggers automatic bind.
 - HWID change cooldown: 30 days (or admin reset).
-- Heartbeat nonce chain: each response carries the nonce for the next request, preventing replay.
-- 3 consecutive missed heartbeats: server revokes the session.
+- Heartbeat nonce chain: each response carries the nonce for the next request, a replay-protection token.
+- 3 consecutive missed heartbeats: server suspends the session.

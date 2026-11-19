@@ -1,5 +1,7 @@
 #pragma once
-// Authentication: challenge-response flow, HMAC-SHA256, HKDF via Windows CNG.
+// Client authentication: nonce-based auth flow against the licensing server,
+// keyed message integrity tag (HMAC-SHA256) and key derivation (RFC 5869)
+// via Windows CNG.
 
 #include <string>
 #include <vector>

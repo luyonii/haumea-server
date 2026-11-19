@@ -1,5 +1,6 @@
 #pragma once
-// AES-256-GCM via Windows CNG (bcrypt.dll). All APIs resolved via dynapi.
+// Authenticated encryption (AES-256-GCM) via Windows CNG (bcrypt.dll).
+// All APIs are bound at runtime through the symbol resolver.
 
 #include <cstdint>
 #include <cstddef>

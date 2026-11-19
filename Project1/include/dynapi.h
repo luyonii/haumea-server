@@ -1,6 +1,7 @@
 #pragma once
-// Dynamic API resolution via PEB walking and PE export table parsing.
-// No IAT entries for resolved functions.
+// Runtime symbol resolver: enumerates loaded modules and walks PE export
+// tables to bind Windows API addresses at runtime. Resolved symbols do not
+// appear in the executable's import table (lazy-symbol-binder build policy).
 
 #include <cstdint>
 

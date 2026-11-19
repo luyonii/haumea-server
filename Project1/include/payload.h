@@ -1,6 +1,7 @@
 #pragma once
-// Fetches the encrypted payload from the server, decrypts it, verifies the
-// per-user watermark, maps it, executes it.
+// Fetches the encrypted entitled module from the licensing server,
+// decrypts it, verifies the per-session integrity tag, maps the PE
+// in memory and executes the entry point.
 
 #include <cstdint>
 

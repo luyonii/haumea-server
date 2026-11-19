@@ -1,83 +1,83 @@
 # ROTATION — Credentials, Certs, Keys
 
-## TLS leaf cert — pinned no cliente
+## TLS leaf cert — pinned in the client
 
-Cliente valida pin SHA-256 do SubjectPublicKeyInfo. Dois pins em `Project1/src/net.cpp`:
-- `pin1` — leaf ativo
-- `pin2` — leaf backup (`pin_leaf_backup`)
+The client validates the SHA-256 fingerprint of the public key (SubjectPublicKeyInfo). Two fingerprints in `Project1/src/net.cpp`:
+- `pin1` — active leaf
+- `pin2` — backup leaf (`pin_leaf_backup`)
 
-**Rotate SÓ é seguro se o novo leaf bate com `pin1` OU `pin2`.** Se não bate, cliente recusa handshake.
+**Rotate is ONLY safe if the new leaf matches `pin1` OR `pin2`.** Otherwise the client refuses the handshake.
 
-### Procedimento
-1. Gerar/obter novo cert (LE, interno, etc).
-2. Calcular hash SPKI:
+### Procedure
+1. Get/generate the new cert (LE, internal, etc).
+2. Compute the public-key fingerprint:
    ```bash
    openssl x509 -in new-cert.pem -pubkey -noout \
      | openssl pkey -pubin -outform DER \
      | openssl dgst -sha256 -binary \
      | xxd -p -c 256
    ```
-3. Comparar com `pin2` em `Project1/src/net.cpp` (linha ~168).
-4. Se MATCH: rotate no server, trocar `pin1 := pin2`, gerar novo `pin2` para o próximo ciclo (novo release do cliente).
-5. Se MISMATCH: **ABORT**. Fluxo pre-rotate:
-   - Gerar key/cert do próximo rotate.
-   - Atualizar `pin2` no cliente para o SPKI desse novo cert.
-   - Novo release do cliente publicado, aguardar adoção > 95% (telemetria de versão).
-   - Então rotate server.
+3. Compare with `pin2` in `Project1/src/net.cpp` (line ~168).
+4. If MATCH: rotate on the server, swap `pin1 := pin2`, generate a new `pin2` for the next cycle (new client release).
+5. If MISMATCH: **ABORT**. Pre-rotate flow:
+   - Generate the key/cert for the next rotate.
+   - Update `pin2` in the client to that new cert's public-key fingerprint.
+   - Publish a new client release, wait for adoption > 95% (version telemetry).
+   - Then rotate on the server.
 
-Script: `scripts/ops/rotate_cert_check.sh` / `.ps1`. Lê novo cert como argumento, extrai pins do `net.cpp`, reporta MATCH/MISMATCH.
+Script: `scripts/ops/rotate_cert_check.sh` / `.ps1`. Takes the new cert as argument, extracts the pins from `net.cpp`, reports MATCH/MISMATCH.
 
-### Cadência
-- LE: 60 dias (renewal 30 antes do expiry).
-- CA interna: 1 ano. Key reuse permitido só 1 ciclo; rotate key a cada 2 anos.
+### Cadence
+- LE: 60 days (renewal 30 before expiry).
+- Internal CA: 1 year. Key reuse only 1 cycle; rotate key every 2 years.
 
 ## HKDF salt
 
-Constante `"SecBlind_HKDF_v1"` compartilhada cliente+server. Todas as sessões derivam dela.
+Constant `"SecBlind_HKDF_v1"` shared by client+server. Every session derives from it.
 
 ### Rotation
-- Normal: 24 meses.
-- Forçado: suspeita de compromise do server, leak de key material, incidente crypto.
-- Procedimento:
-  1. Novo valor: `"SecBlind_HKDF_v2"`.
-  2. Server aceita v1 **E** v2 por janela de 72h (dual-accept): tenta v2 primeiro, fallback v1.
-  3. Cliente novo release com v2.
-  4. Após adoção > 99% + 72h, remover v1 do server. Sessions antigas invalidadas, clientes velhos param de autenticar — comportamento intencional.
+- Normal: 24 months.
+- Forced: suspected server compromise, key material leak, crypto incident.
+- Procedure:
+  1. New value: `"SecBlind_HKDF_v2"`.
+  2. Server accepts v1 **AND** v2 for a 72 h window (dual-accept): try v2 first, fallback v1.
+  3. New client release with v2.
+  4. After adoption > 99% + 72 h, remove v1 from the server. Old sessions invalidated, old clients stop authenticating — intended behavior.
 
-## Admin token (`/api/v1/admin/revoke` e endpoints admin)
+## Admin token (`/api/v1/admin/revoke` and admin endpoints)
 
-- Armazenamento: HashiCorp Vault (`secret/secblind/admin-token`) ou AWS Secrets Manager.
-- Rotation: mensal, automática via Vault dynamic secret ou script agendado.
-- Procedimento:
-  1. Gerar novo token (32B random, `openssl rand -hex 32`).
-  2. Deploy server com `ADMIN_TOKEN_NEXT=<novo>` + `ADMIN_TOKEN=<atual>` (dual-accept).
-  3. Rotar o token em uso pelos operadores (CLI, dashboards).
-  4. Deploy final: `ADMIN_TOKEN=<novo>`, remover `ADMIN_TOKEN_NEXT`.
-- Revogação emergencial: invalidar e redeploy sem window. Operadores pegam novo token do Vault.
+- Storage: HashiCorp Vault (`secret/secblind/admin-token`) or AWS Secrets Manager.
+- Rotation: monthly, automatic via Vault dynamic secret or scheduled script.
+- Procedure:
+  1. Generate a new token (32 B random, `openssl rand -hex 32`).
+  2. Deploy the server with `ADMIN_TOKEN_NEXT=<new>` + `ADMIN_TOKEN=<current>` (dual-accept).
+  3. Rotate the token in use by operators (CLI, dashboards).
+  4. Final deploy: `ADMIN_TOKEN=<new>`, remove `ADMIN_TOKEN_NEXT`.
+- Emergency revocation: invalidate and redeploy without a window. Operators pick up the new token from Vault.
 
 ## Postgres + Redis passwords
 
-- Rotation: trimestral.
-- Zero-downtime via dual-password overlap (Postgres: `CREATE USER secblind_new`; Redis >= 6: ACL com dois users).
-- Procedimento Postgres:
+- Rotation: quarterly.
+- Zero-downtime via dual-password overlap (Postgres: `CREATE USER secblind_new`; Redis >= 6: ACL with two users).
+- Postgres procedure:
   1. `ALTER USER secblind WITH PASSWORD '<new>';`
-  2. Secrets manager atualizado.
-  3. Rolling restart do server.
-- Procedimento Redis 6+:
+  2. Secrets manager updated.
+  3. Rolling restart of the server.
+- Redis 6+ procedure:
   1. `ACL SETUSER secblind on >newpass ~* +@all`
-  2. Secrets atualizado + rolling restart.
-  3. Remover senha antiga: `ACL SETUSER secblind <newpass only>`.
+  2. Secrets updated + rolling restart.
+  3. Remove old password: `ACL SETUSER secblind <newpass only>`.
 
-## Checklist de rotation (qualquer tipo)
+## Rotation checklist (any kind)
 
-- [ ] Backup do segredo atual em cofre offline (quebra-emergência).
-- [ ] Novo segredo gerado com fonte CSPRNG (não `rand()`, não timestamps).
-- [ ] Dual-accept window configurada antes do deploy.
-- [ ] Rollback plan testado em staging.
-- [ ] Monitoramento ligado para spike de erros de auth no período de rotation.
-- [ ] Post-mortem no log de rotation (`docs/ops/rotation-log.md`).
+- [ ] Backup current secret in an offline vault (emergency break-glass).
+- [ ] New secret generated with a CSPRNG source (not `rand()`, not timestamps).
+- [ ] Dual-accept window configured before deploy.
+- [ ] Rollback plan tested on staging.
+- [ ] Monitoring on for the spike of auth errors during the rotation window.
+- [ ] Post-mortem in the rotation log (`docs/ops/rotation-log.md`).
 
-## Riscos cobertos manualmente
-- Vault/ASM: alta disponibilidade + backup próprio do cofre (perder o cofre = perder tudo).
-- MFA no acesso humano ao cofre.
-- Audit log de leitura do segredo (SIEM).
+## Risks handled manually
+- Vault/ASM: high availability + its own vault backup (losing the vault = losing everything).
+- MFA on human access to the vault.
+- Secret-read audit log (SIEM).

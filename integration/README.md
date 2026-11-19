@@ -20,20 +20,20 @@ runs from `integration\` unless noted.
    .\scripts\build_dummy_payload.ps1
    ```
 
-3. **Seed schema + license + payload**
+3. **Seed schema + license + entitled module**
    ```powershell
    .\scripts\seed_license.ps1
    ```
-   Note the printed `TEST-XXXX-...` license key.
+   Note the printed `TEST-XXXX-...` activation code.
 
-4. **Generate self-signed cert and get the pin hash**
+4. **Generate self-signed cert and get the fingerprint hash**
    ```powershell
    .\scripts\gen_cert.ps1
    ```
    Copy the printed 64-char lowercase hex SHA-256.
 
 5. **Patch the client**
-   - `Project1\src\net.cpp` lines 161-162: replace both `aaa.../bbb...` placeholders with the same SHA-256 hex from step 4 (keep both, the client accepts either as a current/backup pin).
+   - `Project1\src\net.cpp` lines 161-162: replace both `aaa.../bbb...` placeholders with the same SHA-256 hex from step 4 (keep both, the client accepts either as a current/backup fingerprint).
    - `Project1\src\Main.cpp` line 103: change `"your-server.example.com"` to `"secblind.local"`.
    - Rebuild `Project1` in VS 2026 (x64 Release).
 
@@ -55,7 +55,7 @@ runs from `integration\` unless noted.
    go run .\cmd\server .\config.yaml
    ```
 
-9. **Run the loader** with the seeded license key. Expected sequence:
+9. **Run the loader** with the seeded activation code. Expected sequence:
    - `/auth/challenge` → 200
    - `/auth/login` → 200 (binds this machine's HWID on first call)
    - `/session/heartbeat` → 200 every 60s

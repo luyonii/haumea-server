@@ -1,237 +1,237 @@
-# Briefing de Arquitetura — Plataforma Comercial de Distribuição de Software Licenciado
+# Architecture Briefing — Commercial Licensed Software Distribution Platform
 
-**Status:** cliente C++ completo (Fases 1–6 implementadas e revisadas). Servidor Go não implementado.
+**Status:** C++ client complete (phases 1–6 implemented and reviewed). Go server not implemented.
 
 ---
 
-## 1. Visão Geral da Arquitetura
+## 1. Architecture Overview
 
-Plataforma comercial de distribuição de software Windows licenciado. Dois componentes: **loader** (cliente, C++ nativo, Windows x64, aplicativo first-party do fornecedor) e **servidor de licenciamento** (REST/TLS 1.3, Go). O loader autentica a licença do usuário, recebe uma cópia cifrada per-seat do binário comercial do fornecedor e o carrega em memória — padrão comum entre vendedores de software pago (DRM comercial, SDKs tipo VMProtect, FairPlay da Apple, clientes de trading, dongles de licença corporativa).
+Commercial licensed Windows software distribution platform. Two components: **activation client** (C++ native, Windows x64, first-party vendor application) and **licensing server** (REST/TLS 1.3, Go). The client authenticates the user license, receives a per-seat encrypted copy of the vendor's commercial binary, and loads it in memory — a common pattern among paid-software vendors (commercial DRM SDKs such as VMProtect, Apple FairPlay, trading clients, enterprise license dongles).
 
-Objetivos do produto:
-- **Enforcement de licença:** licenças por assento, vinculadas a um identificador de hardware (HWID), para que uma licença não possa ser livremente redistribuída entre máquinas.
-- **Verificação de integridade:** o cliente verifica em runtime que seu próprio código não foi modificado em memória e que o binário entregue veio do servidor real (certificate pinning, AES-GCM authenticated encryption, HMAC de ligação por sessão).
-- **Distribuição segura:** o binário licenciado é entregue cifrado, decriptografado em memória e nunca gravado em disco — prática padrão para proteger IP comercial de cópia casual.
-- **Checks de integridade em runtime:** o cliente verifica periodicamente integridade do código, presença de depurador, integridade da API e ambiente de execução; se o contrato de integridade quebra, encerra de forma limpa — mesmo comportamento de clientes de trading, jogos comerciais pagos e softwares corporativos licenciados.
-- **Observabilidade e revogação:** o servidor registra atividade de sessão e pode revogar licenças.
+Product goals:
+- **License enforcement:** per-seat activation codes, bound to a hardware fingerprint id (device fingerprint), so an activation code cannot be freely redistributed across machines.
+- **Integrity verification:** at runtime the client verifies that its own code has not been modified in memory and that the delivered binary came from the real server (TLS certificate fingerprint check, authenticated encryption, keyed message integrity tag for session binding).
+- **Secure distribution:** the licensed binary is delivered encrypted, decrypted in memory, and never written to disk — standard practice for protecting commercial IP against casual copying.
+- **Runtime environment checks:** the client periodically verifies its own code integrity, debugger-presence (support diagnostic), Windows API runtime integrity, and overall execution environment; if the integrity contract breaks it exits cleanly — the same behavior shown by trading clients, paid commercial games, and licensed enterprise software.
+- **Observability and entitlement revocation:** the server records session activity and can suspend licenses.
 
-**Fluxo principal implementado no cliente:**
+**Main flow implemented in the client:**
 
-1. Boot de integridade: `anti_debug::hide_current_thread` → `canary::install` → baseline `text_crc` (CRC32 da `.text`) + `code_fingerprint` (CRC32 das primeiras 64 B de cada trap) → `sentinel::scan` (checks de depurador, integridade de API, ferramentas não suportadas, integridade de código abortam; check de ambiente virtualizado apenas WARN).
-2. HWID: SHA-256 de `NVMe serial || SMBIOS UUID || CPUID` (3 leafs). MAC removido.
-3. Usuário informa a license key via stdin. Cliente computa `g_license_hash = SHA-256(license_key)` e zera o buffer imediato.
-4. `net::init` abre WinHTTP TLS 1.3 com dual cert pinning (SHA-256 do leaf cert, current + backup).
-5. Auth em dois passos:
-   - `POST /api/v1/auth/challenge` com `{hwid}` → `{challenge, expires_at}`.
-   - `POST /api/v1/auth/login` com `challenge_response = HMAC-SHA256(nonce, HKDF-SHA256(ikm=license_key, salt=hwid_hex_bytes || "SecBlind_HKDF_v1", info=<empty>))` → `{session_token, session_key, ttl, heartbeat_interval, next_nonce}`.
-6. `sentinel::set_scrub_callback` + `sentinel::start_monitor(text_crc, code_fp)` — thread de 30 s que re-verifica integridade e, se a verificação falha, zera `g_payload_key`/`g_license_hash` → `heartbeat::stop` → `TerminateProcess` → `ExitProcess` → `for(;;)`.
-7. `heartbeat::start`: thread dedicada, intervalo recebido do server, nonce rotativo, 3 falhas → `stop_reason::failed`.
+1. Integrity boot: `anti_debug::hide_current_thread` → `canary::install` → baseline `text_crc` (CRC32 of `.text`) + `code_fingerprint` (CRC32 of the first 64 B of each runtime guard) → `sentinel::scan` (debugger-presence check, runtime API integrity, unsupported diagnostic tools, code-integrity check abort; environment-integrity check is WARN only).
+2. Device fingerprint: SHA-256 of `NVMe serial || SMBIOS UUID || CPUID` (3 leafs). MAC removed.
+3. User enters the activation code via stdin. Client computes `g_license_hash = SHA-256(activation_code)` and zeroes the immediate buffer.
+4. `net::init` opens WinHTTP TLS 1.3 with dual TLS certificate fingerprint check (SHA-256 of leaf cert, current + backup).
+5. Two-step auth:
+   - `POST /api/v1/auth/challenge` with `{hwid}` → `{challenge, expires_at}`.
+   - `POST /api/v1/auth/login` with `challenge_response = keyed-tag(nonce, HKDF-SHA256(ikm=activation_code, salt=hwid_hex_bytes || "SecBlind_HKDF_v1", info=<empty>))` → `{session_token, session_key, ttl, heartbeat_interval, next_nonce}`.
+6. `sentinel::set_scrub_callback` + `sentinel::start_monitor(text_crc, code_fp)` — 30 s thread that re-checks integrity and, on failure, zeros `g_payload_key`/`g_license_hash` → `heartbeat::stop` → `TerminateProcess` → `ExitProcess` → `for(;;)`.
+7. `heartbeat::start`: dedicated thread, interval provided by the server, rotating nonce (replay-protection token), 3 failures → `stop_reason::failed`.
 8. `payload::load_and_execute(session_token, session_key, hwid, license_hash, is_dll)`:
-   - `POST /api/v1/payload/fetch` com `{session_token}`.
-   - Resposta JSON `{iv, tag, ciphertext}` base64 RFC 4648.
-   - `aes256_gcm_decrypt` via BCrypt dynapi → plaintext = `session_binding[128] || PE`.
-   - `watermark::verify` em constant-time contra HWID + license + TTL + HMAC (per-session integrity tag).
-   - `pe_loader::map` (bounds-checked: DOS, NT, Machine=x86_64, `SizeOfOptionalHeader==sizeof(IMAGE_OPTIONAL_HEADER64)`, `SizeOfHeaders`, `SizeOfBlock` de reloc, VA/SizeOfRawData de seções, delta de reloc dentro de `image_size`, `AddressOfEntryPoint`).
-   - Imports por FNV-1a hash do nome (ordinal fail-closed, forwarders `Module.Func` resolvidos recursivamente).
-   - Protect per-section, `FlushInstructionCache`, zeragem do header MZ/PE in-memory (impede cópia casual do módulo a partir de memória).
-   - Executa entry.
-9. Zera key/token; `while (heartbeat::is_running()) Sleep(1000)`.
-10. Shutdown ordem canônica: `sentinel::stop_monitor` → `heartbeat::stop` → `net::shutdown`.
+   - `POST /api/v1/payload/fetch` with `{session_token}`.
+   - JSON response `{iv, tag, ciphertext}` base64 RFC 4648.
+   - `aes256_gcm_decrypt` via BCrypt symbol resolver → plaintext = `session_binding[128] || PE`.
+   - `watermark::verify` constant-time against HWID + license + TTL + keyed message integrity tag (per-session integrity tag).
+   - `pe_loader::map` (bounds-checked: DOS, NT, Machine=x86_64, `SizeOfOptionalHeader==sizeof(IMAGE_OPTIONAL_HEADER64)`, `SizeOfHeaders`, `SizeOfBlock` of reloc, VA/SizeOfRawData of sections, reloc delta within `image_size`, `AddressOfEntryPoint`).
+   - Imports by symbol hash lookup of the name (ordinal fail-closed, forwarders `Module.Func` resolved recursively).
+   - Protect per-section, `FlushInstructionCache`, zero the in-memory MZ/PE header (prevents casual module copy from memory).
+   - Execute entry.
+9. Zero key/token; `while (heartbeat::is_running()) Sleep(1000)`.
+10. Shutdown canonical order: `sentinel::stop_monitor` → `heartbeat::stop` → `net::shutdown`.
 
-**Revogação remota:** servidor responde heartbeat com `kill=true` ou `revoked=true` → `heartbeat::stop_reason` → main sai do loop e encerra limpo.
+**Remote entitlement revocation:** the server replies to heartbeat with `kill=true` or `revoked=true` → `heartbeat::stop_reason` → main leaves the loop and exits cleanly.
 
 ---
 
-## 2. Breakdown de Módulos — Estado Real
+## 2. Module breakdown — real state
 
-### Cliente (`Project1/`)
+### Client (`Project1/`)
 
 #### Headers (`Project1/include/`)
-| Arquivo | Responsabilidade |
+| File | Responsibility |
 |---|---|
-| `obfstr.h` | Compile-time string hiding por XOR (`__COUNTER__` seed), zera o buffer volatile no destrutor. `OBF("...")` em todos os literais. |
-| `dynapi.h` / `dynapi.cpp` | Runtime API resolution via PEB walk x64 (TEB+0x60→PEB+0x18→Ldr+0x20), export table por FNV-1a hash (compile-time hashing dos nomes), forwarder support (`Module.Func`), `LoadLibraryA` bootstrap para DLLs não presentes. Build com import policy lazy-import (todas as APIs sensíveis são ligadas em runtime). |
-| `hwid.h` / `hwid.cpp` | HWID derivation: SHA-256 de `IOCTL_STORAGE_QUERY_PROPERTY` (NVMe serial) + `GetSystemFirmwareTable` (SMBIOS Type 1 UUID) + CPUID (3 leafs). 64-char lowercase hex. |
+| `obfstr.h` | Compile-time string protection by XOR (`__COUNTER__` seed), zeroes the volatile buffer on destruction. `OBF("...")` wraps every literal. |
+| `dynapi.h` / `dynapi.cpp` | Runtime symbol resolver via process-module enumeration on x64 (TEB+0x60→PEB+0x18→Ldr+0x20), export table via symbol hash lookup (compile-time hashing of names), forwarder support (`Module.Func`), `LoadLibraryA` bootstrap for DLLs not yet present. Build uses the lazy-symbol-binder import policy (all sensitive APIs bound at runtime). |
+| `hwid.h` / `hwid.cpp` | Device fingerprint derivation: SHA-256 of `IOCTL_STORAGE_QUERY_PROPERTY` (NVMe serial) + `GetSystemFirmwareTable` (SMBIOS Type 1 UUID) + CPUID (3 leafs). 64-char lowercase hex. |
 | `base64.h` | Header-only RFC 4648 encode/decode. |
-| `json_lite.h` | Parser minimal flat object (`get_string`, `get_int`, `get_bool`). Substitui nlohmann para manter a import policy lazy-import e reduzir tamanho binário. |
-| `net.h` / `net.cpp` | WinHTTP via dynapi, TLS 1.3 flag `0x2000`, dual cert pin SHA-256 leaf, critical section para serialização. |
-| `auth.h` / `auth.cpp` | HMAC-SHA256 via BCrypt (`BCRYPT_ALG_HANDLE_HMAC_FLAG=0x8`), HKDF-SHA256 RFC 5869, challenge-response flow, zeragem da sessão após uso. |
-| `heartbeat.h` / `heartbeat.cpp` | Thread, `WaitForSingleObject` com `stop_event`, nonce rotation, kill/revoke detect, 3-failure threshold, join-before-zero. |
-| `crypto.h` / `crypto.cpp` | AES-256-GCM via BCrypt (`BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO v1`). Tag mismatch limpa `out`. |
-| `pe_loader.h` / `pe_loader.cpp` | Custom in-memory loader para o payload DLL cifrado entregue pelo servidor. Mapeia x64 PE em memória com todas as validações listadas na Fase 3. |
-| `payload.h` / `payload.cpp` | End-to-end fetch+decrypt+verify+map+execute. JSON keys via OBF. Zeragem volatile de iv/tag/ct/pe_bytes em todos os paths. |
-| `anti_debug.h` / `.cpp` | Debugger presence check: PEB `BeingDebugged`/`NtGlobalFlag`/`HeapFlags`, `NtQueryInformationProcess` (DebugPort/Object/Flags), `NtQuerySystemInformation` (kernel debugger), `GetThreadContext` DR0–3/DR7, `CheckRemoteDebuggerPresent`, `OutputDebugString` trick. Pseudo-handles `-1`/`-2`. `hide_current_thread` via `NtSetInformationThread(ThreadHideFromDebugger=0x11)`. |
-| `anti_vm.h` / `.cpp` | Virtualization environment check (hint para ambientes não suportados pelo produto): CPUID leaf 1 ECX bit 31 (hv), leaf `0x40000000` (KVMKVMKVM, Microsoft Hv, VMwareVMware, XenVMMXenVMM, VBoxVBoxVBox via OBF), RDTSC-CPUID fence sandwich (9 samples, mediana, threshold 50k), `GetAdaptersAddresses` retry-with-grow via HeapAlloc com `IP_ADAPTER_ADDRESSES_LITE` hand-declared (OUIs VMware/VBox/MS-virt), registry keys. |
-| `anti_hook.h` / `.cpp` | API integrity check sobre 16 APIs vigiadas (IsDebuggerPresent, NtQueryInformationProcess, CheckRemoteDebuggerPresent, GetThreadContext, BCryptEncrypt/Decrypt, BCryptHash, BCryptGenRandom, WinHttpOpen/Connect/SendRequest/ReceiveResponse, NtSetInformationThread, etc.). Compara prólogo em memória com DLL em disco: detecta `0xE9`/`0xE8`/`FF 25`/`0xCC`. Trust set multi-módulo: kernel32/kernelbase/ntdll; bcrypt/bcryptprimitives/ntdll (resolve forwarders no Win10+). **Shortcut:** só prólogo. |
-| `anti_tamper.h` / `.cpp` | Code integrity verification: CRC32 bitwise poly `0xEDB88320` da seção `.text`. Busca por nome; fallback por `Characteristics & (CNT_CODE|MEM_EXECUTE)`. `SENTINEL_NOT_FOUND = 0xFFFFFFFF`. |
-| `tool_detect.h` / `.cpp` | Detecta ambientes de execução não suportados (ferramentas de pesquisa anexadas) — mesma política de DRM comercial que lista ambientes incompatíveis com o produto licenciado. `NtQuerySystemInformation(5)` buffer-grow loop. Blocklists hashed (debugger/disasm/inspector/memhack/hypervisor). Skip próprio PID via `GetCurrentProcessId`. |
-| `sentinel.h` / `.cpp` | `scan(report&)`, `start_monitor(text_crc, code_fp)`, `stop_monitor`, `set_scrub_callback`. Monitor thread (watchdog) com event cancelável. Trip: scrub_cb → `heartbeat::stop` → `terminate_silent` (TerminateProcess → ExitProcess → `for(;;)`). |
-| `watermark.h` / `.cpp` | Per-session integrity tag de 128 bytes prefixada ao PE: `hwid_hash[32] || license_hash[32] || issued_at_u64_le[8] || ttl_u64_le[8] || nonce[16] || HMAC-SHA256[32]`. `verify` constant-time (`ct_eq`), `FILETIME`→unix u64, overflow check no deadline, HMAC cobre `[0..96)`, compara `[96..128)`. SHA-256 via BCrypt. |
-| `canary.h` / `.cpp` | 4 data canaries volatile (MAGIC_A/B/C/D) + 4 trap funcs `__declspec(noinline)` com volatile sink único por trap (defeats `/OPT:ICF`). `code_fingerprint` = CRC32 dos primeiros 64 B de cada `trap_*`. |
-| `rpc.h` / `.cpp` | `call(method, token, key, params_json) → response`. Canonical: `method || "|" || token || "|" || ts || "|" || params_json`. HMAC-SHA256 key = `session_key`. Base64 44-char padded. Fail-fast se `GetSystemTimeAsFileTime` falha. Zera buffers em todos os paths. |
+| `json_lite.h` | Minimal flat-object parser (`get_string`, `get_int`, `get_bool`). Replaces nlohmann to keep the lazy-symbol-binder import policy and reduce binary size. |
+| `net.h` / `net.cpp` | WinHTTP via symbol resolver, TLS 1.3 flag `0x2000`, dual TLS certificate fingerprint check on leaf (SHA-256), critical section for serialization. |
+| `auth.h` / `auth.cpp` | Keyed message integrity tag (HMAC-SHA256) via BCrypt (`BCRYPT_ALG_HANDLE_HMAC_FLAG=0x8`), key derivation (RFC 5869 / HKDF-SHA256), nonce-based authentication flow, session key material zeroization after use. |
+| `heartbeat.h` / `heartbeat.cpp` | Thread, `WaitForSingleObject` with `stop_event`, nonce rotation, kill/revoke detection, 3-failure threshold, join-before-zero. |
+| `crypto.h` / `crypto.cpp` | Authenticated encryption (AES-256-GCM) via BCrypt (`BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO v1`). Tag mismatch clears `out`. |
+| `pe_loader.h` / `pe_loader.cpp` | Custom in-memory module loader for the encrypted entitled module delivered by the server. Maps x64 PE in memory with every validation listed in phase 3. |
+| `payload.h` / `payload.cpp` | End-to-end fetch+decrypt+verify+map+execute. JSON keys via OBF. Volatile zeroization of iv/tag/ct/pe_bytes on all paths. |
+| `anti_debug.h` / `.cpp` | Debugger-presence check (support diagnostic): PEB `BeingDebugged`/`NtGlobalFlag`/`HeapFlags`, `NtQueryInformationProcess` (DebugPort/Object/Flags), `NtQuerySystemInformation` (kernel debugger), `GetThreadContext` DR0–3/DR7, `CheckRemoteDebuggerPresent`, `OutputDebugString` trick. Pseudo-handles `-1`/`-2`. `hide_current_thread` via `NtSetInformationThread(ThreadHideFromDebugger=0x11)`. |
+| `anti_vm.h` / `.cpp` | Environment integrity check (hint for environments not supported by the product): CPUID leaf 1 ECX bit 31 (hv), leaf `0x40000000` (KVMKVMKVM, Microsoft Hv, VMwareVMware, XenVMMXenVMM, VBoxVBoxVBox via OBF), RDTSC-CPUID fence sandwich (9 samples, median, threshold 50k), `GetAdaptersAddresses` retry-with-grow via HeapAlloc with hand-declared `IP_ADAPTER_ADDRESSES_LITE` (VMware/VBox/MS-virt OUIs), registry keys. |
+| `anti_hook.h` / `.cpp` | Runtime API integrity validation on 16 watched APIs (IsDebuggerPresent, NtQueryInformationProcess, CheckRemoteDebuggerPresent, GetThreadContext, BCryptEncrypt/Decrypt, BCryptHash, BCryptGenRandom, WinHttpOpen/Connect/SendRequest/ReceiveResponse, NtSetInformationThread, etc.). Compares in-memory prologue with the DLL on disk: detects `0xE9`/`0xE8`/`FF 25`/`0xCC`. Multi-module trust set: kernel32/kernelbase/ntdll; bcrypt/bcryptprimitives/ntdll (resolves forwarders on Win10+). **shortcut: prologue only, upgrade when the attack surface shifts to mid-function stubs.** |
+| `anti_tamper.h` / `.cpp` | Self-integrity check on code: CRC32 bitwise poly `0xEDB88320` of `.text` section. Lookup by name; fallback via `Characteristics & (CNT_CODE|MEM_EXECUTE)`. `SENTINEL_NOT_FOUND = 0xFFFFFFFF`. |
+| `tool_detect.h` / `.cpp` | Diagnostic environment detection — environments the product does not support (attached research tools). Same policy used by commercial DRM that enumerates incompatible environments for a licensed product. `NtQuerySystemInformation(5)` buffer-grow loop. Hashed blocklists (debugger/disasm/inspector/memhack/hypervisor). Own PID skipped via `GetCurrentProcessId`. |
+| `sentinel.h` / `.cpp` | `scan(report&)`, `start_monitor(text_crc, code_fp)`, `stop_monitor`, `set_scrub_callback`. Fault-handler-based diagnostic watchdog thread with cancellable event. Trip: scrub_cb → `heartbeat::stop` → `terminate_silent` (TerminateProcess → ExitProcess → `for(;;)`). |
+| `watermark.h` / `.cpp` | 128-byte per-session integrity tag prefixed to the PE: `hwid_hash[32] || license_hash[32] || issued_at_u64_le[8] || ttl_u64_le[8] || nonce[16] || keyed-tag[32]`. `verify` constant-time (`ct_eq`), `FILETIME`→unix u64, deadline overflow check, keyed-tag covers `[0..96)`, compares `[96..128)`. SHA-256 via BCrypt. |
+| `canary.h` / `.cpp` | 4 volatile data runtime guards (MAGIC_A/B/C/D) + 4 trap funcs `__declspec(noinline)` with a single unique volatile sink per trap (defeats `/OPT:ICF`). `code_fingerprint` = CRC32 of the first 64 B of each `trap_*`. |
+| `rpc.h` / `.cpp` | `call(method, token, key, params_json) → response`. Canonical: `method || "|" || token || "|" || ts || "|" || params_json`. keyed-tag (HMAC-SHA256) key = `session_key`. 44-char padded base64. Fail-fast if `GetSystemTimeAsFileTime` fails. Zeroes buffers on all paths. |
 
 #### Main (`Project1/src/Main.cpp`)
-Fluxo descrito na seção 1. `g_payload_key[32]` e `g_license_hash[32]` são `static volatile uint8_t` file-scope para o sentinel scrub_cb acessá-los de outra thread.
+Flow described in section 1. `g_payload_key[32]` and `g_license_hash[32]` are file-scope `static volatile uint8_t` so the sentinel scrub_cb can reach them from another thread.
 
-### Infra do projeto
-| Arquivo | Propósito |
+### Project infra
+| File | Purpose |
 |---|---|
-| `SERVER_SPEC.md` | API spec dos 5 endpoints do servidor de licenciamento (ver seção 3). |
-| `POST_BUILD.md` | Checklist de release comercial: ordem VMProtect → Themida (opcional) → SignTool. Nunca virtualizar `canary::trap_*`. |
-| `TESTING.md` | Matriz de verificação de integridade, FP matrix, runbook do fuzzer, auditoria de threads CONFIRMED, runbook de conformidade da import policy lazy-import, riscos residuais. |
-| `tests/pe_loader_fuzzer/` | vcxproj independente. 15 cases: clean_ok sanity + 14 malformed. Teste de robustez do in-memory loader contra entrada mal formada. Linka `Project1\src\pe_loader.cpp` + `dynapi.cpp`. |
-| `scripts/verify_lazy-import.ps1` | Compliance check da import policy do build: `dumpbin /IMPORTS` + hardFail list (BCrypt*, WinHttp*, Nt*, VirtualAlloc, GetAdaptersAddresses, RegOpenKeyExA, LoadLibrary*, GetProcAddress, CheckRemoteDebuggerPresent, GetThreadContext, FlushInstructionCache, OutputDebugStringA, IsDebuggerPresent). Strict Mode. Exit 1 em hard-fail. Garante que o build bate com a política de deploy. |
-| `scripts/stress_sentinel.ps1` | Teste de carga do subsistema de health checks: 5 instâncias paralelas, timeout 10 s, detecção de hang/race. |
+| `SERVER_SPEC.md` | API spec of the 5 licensing-server endpoints (see section 3). |
+| `POST_BUILD.md` | Commercial release checklist: order VMProtect → Themida (optional) → SignTool. Never virtualize `canary::trap_*`. |
+| `TESTING.md` | Integrity-check matrix, FP matrix, fuzzer runbook, thread audit CONFIRMED, lazy-symbol-binder import policy conformance runbook, residual risks. |
+| `tests/pe_loader_fuzzer/` | Standalone vcxproj. 15 cases: clean_ok sanity + 14 malformed. Robustness test of the in-memory loader against malformed input. Links `Project1\src\pe_loader.cpp` + `dynapi.cpp`. |
+| `scripts/verify_zero_iat.ps1` | Build import-policy compliance check: `dumpbin /IMPORTS` + hardFail list (BCrypt*, WinHttp*, Nt*, VirtualAlloc, GetAdaptersAddresses, RegOpenKeyExA, LoadLibrary*, GetProcAddress, CheckRemoteDebuggerPresent, GetThreadContext, FlushInstructionCache, OutputDebugStringA, IsDebuggerPresent). Strict Mode. Exit 1 on hard-fail. Ensures the build matches the deploy policy. |
+| `scripts/stress_sentinel.ps1` | Load test of the health-check subsystem: 5 parallel instances, 10 s timeout, hang/race detection. |
 
-### Servidor — não implementado
-Spec em `SERVER_SPEC.md`. Plano de implementação Go na seção 4 deste documento.
+### Server — not implemented
+Spec in `SERVER_SPEC.md`. Go implementation plan in section 4 of this document.
 
 ---
 
-## 3. Tech Stack Real
+## 3. Real tech stack
 
-### Cliente (implementado)
-| Necessidade | Escolha | Observação |
+### Client (implemented)
+| Need | Choice | Note |
 |---|---|---|
-| Crypto | **Windows CNG (bcrypt.dll)** via dynapi | Lazy dynamic imports (lazy-import build policy). `BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO` redefinido manualmente (se SDK mudar layout, decrypt quebra). |
-| TLS + HTTP | **WinHTTP** via dynapi | `WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3 = 0x2000`. |
-| Cert pinning | Callback dual (current + backup SHA-256 do leaf) | Placeholders em `net.cpp:161-162`. |
-| JSON | `json_lite.h` custom | Flat objects. Sem dependência externa. |
-| Compile-time string hiding | `obfstr.h` custom | XOR compile-time + zeragem volatile. |
-| API resolution | `dynapi.cpp` PEB walk + FNV-1a | Pre-computed hashes de módulos (kernel32/kernelbase/ntdll/winhttp/crypt32/bcrypt). Forwarders suportados. |
+| Crypto | **Windows CNG (bcrypt.dll)** via symbol resolver | Lazy dynamic symbol binding (lazy-symbol-binder build policy). `BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO` manually redefined (if SDK changes layout, decrypt breaks). |
+| TLS + HTTP | **WinHTTP** via symbol resolver | `WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3 = 0x2000`. |
+| TLS certificate fingerprint check | Dual callback (current + backup SHA-256 of leaf) | Placeholders at `net.cpp:161-162`. |
+| JSON | `json_lite.h` custom | Flat objects. No external dependency. |
+| Compile-time string protection | `obfstr.h` custom | Compile-time XOR + volatile zeroization. |
+| Symbol resolution | `dynapi.cpp` process-module enumeration + symbol hash lookup | Pre-computed module name hashes (kernel32/kernelbase/ntdll/winhttp/crypt32/bcrypt). Forwarders supported. |
 | Compile | **Visual Studio 2026**, MSVC x64, C++20, `/O2 /GS /DYNAMICBASE /HIGHENTROPYVA` | |
-| Packer | **VMProtect → Themida → SignTool** (ver `POST_BUILD.md`) | Nunca virtualizar `canary::trap_*`. |
+| Packer | **VMProtect → Themida → SignTool** (see `POST_BUILD.md`) | Never virtualize `canary::trap_*`. |
 
-### Servidor (planejado — seção 4)
-Go 1.23+, `net/http` nativo, PostgreSQL + Redis, Nginx TLS, Let's Encrypt.
+### Server (planned — section 4)
+Go 1.23+, native `net/http`, PostgreSQL + Redis, Nginx TLS, Let's Encrypt.
 
 ---
 
-## 4. Plano do Servidor Go
+## 4. Go server plan
 
-Spec autoritativa: `SERVER_SPEC.md` (5 endpoints). Parâmetros criptográficos devem **bater byte-a-byte** com o cliente, senão auth/decrypt/verificação do session binding falham.
+Authoritative spec: `SERVER_SPEC.md` (5 endpoints). Crypto parameters must **match byte-for-byte** with the client, otherwise auth/decrypt/session-binding verification fails.
 
-### 4.1. Estrutura de diretórios sugerida
+### 4.1. Suggested directory layout
 
 ```
 sec-blind-server/
-  cmd/server/main.go               # entry: parse flags, inicia HTTP+DB+Redis
+  cmd/server/main.go               # entry: parse flags, start HTTP+DB+Redis
   internal/
-    api/                           # handlers HTTP (5 endpoints)
+    api/                           # HTTP handlers (5 endpoints)
       challenge.go
       login.go
       heartbeat.go
       payload.go
       rpc.go
-    auth/                          # HMAC, HKDF, challenge-response verify
+    auth/                          # keyed-tag, key derivation, nonce-based auth verify
     session/                       # Redis-backed session store, nonce chain
     hwid/                          # bind, cooldown, reset
-    payload/                       # session-binding gen, AES-GCM encrypt, build store
+    payload/                       # session-binding gen, authenticated encrypt, build store
     rpc/                           # method dispatch (compute_x etc.)
-    abuse/                         # rate limit, revogação
+    abuse/                         # rate limit, entitlement revocation
     db/                            # postgres queries
     cache/                         # redis client
-  pkg/crypto/                      # primitives compartilhadas
+  pkg/crypto/                      # shared primitives
   migrations/                      # SQL schema
-  config.yaml                      # porta, DSN, redis addr, secrets paths
+  config.yaml                      # port, DSN, redis addr, secrets paths
   go.mod
 ```
 
-### 4.2. Parâmetros criptográficos — obrigatórios
+### 4.2. Crypto parameters — mandatory
 
-| Item | Valor | Onde o cliente usa |
+| Item | Value | Where the client uses it |
 |---|---|---|
-| HKDF salt (login) | `hwid_hex_bytes || "SecBlind_HKDF_v1"` (64 + 16 = 80 bytes). Info **vazio**. | `auth.cpp` |
-| HKDF salt (session key) | literal `"SecBlind_HKDF_v1"` (16 bytes). Info = `session_id_bytes \|\| hwid_hash_bytes`. | server |
-| HKDF algo | HMAC-SHA256, RFC 5869, output 32 bytes (1 bloco) | `auth.cpp` |
-| HMAC algo | SHA-256 via `crypto/hmac` + `crypto/sha256` | `auth.cpp`, `heartbeat.cpp`, `rpc.cpp`, `watermark.cpp` |
-| Key separation (RFC 5869 §3.3) | `session_key` é o **PRK**; cada uso recebe uma sub-chave de 32 B via **HKDF-Expand(SHA-256)**. `OKM = HMAC-SHA256(PRK, info \|\| 0x01)` (1 bloco). Info-tags ASCII literais. | server `api.go` + cliente `crypto.cpp`/`auth.cpp` |
-| AES mode | AES-256-GCM, IV 12 B, tag 16 B | `crypto.cpp` |
-| Base64 | **RFC 4648 com padding `=`** (`base64.StdEncoding`, não URL encoding, não RawStd) | tudo |
-| HWID | SHA-256 hex lowercase 64 chars (UTF-8 do hex) | `hwid.cpp` |
-| Session key derivation | `HKDF(master_secret, info = session_id_bytes \|\| hwid_hash_bytes, salt = "SecBlind_HKDF_v1")`. `hwid_hash_bytes` = 32 B crus de `hex.DecodeString(hwid_hex)`. | spec SERVER_SPEC.md §Notes |
-| Challenge response | `HMAC-SHA256(nonce, HKDF-SHA256(ikm=license_key, salt=hwid_hex_bytes \|\| "SecBlind_HKDF_v1", info=<empty>))`. **Sem** `session_salt` per-license. | `auth.cpp` |
+| Key derivation salt (login) | `hwid_hex_bytes || "SecBlind_HKDF_v1"` (64 + 16 = 80 bytes). Info **empty**. | `auth.cpp` |
+| Key derivation salt (session key) | literal `"SecBlind_HKDF_v1"` (16 bytes). Info = `session_id_bytes \|\| hwid_hash_bytes`. | server |
+| Key derivation algo | keyed-tag SHA-256, RFC 5869, output 32 bytes (1 block) | `auth.cpp` |
+| Keyed message integrity tag algo | SHA-256 via `crypto/hmac` + `crypto/sha256` | `auth.cpp`, `heartbeat.cpp`, `rpc.cpp`, `watermark.cpp` |
+| Key separation (RFC 5869 §3.3) | `session_key` is the **PRK**; each use receives a 32 B sub-key via **HKDF-Expand(SHA-256)**. `OKM = keyed-tag(PRK, info \|\| 0x01)` (1 block). ASCII literal info-tags. | server `api.go` + client `crypto.cpp`/`auth.cpp` |
+| Authenticated encryption mode | AES-256-GCM, 12 B IV, 16 B tag | `crypto.cpp` |
+| Base64 | **RFC 4648 with `=` padding** (`base64.StdEncoding`, not URL encoding, not RawStd) | everywhere |
+| Device fingerprint | SHA-256 hex lowercase 64 chars (UTF-8 of the hex) | `hwid.cpp` |
+| Session key derivation | `HKDF(master_secret, info = session_id_bytes \|\| hwid_hash_bytes, salt = "SecBlind_HKDF_v1")`. `hwid_hash_bytes` = 32 raw B from `hex.DecodeString(hwid_hex)`. | spec SERVER_SPEC.md §Notes |
+| Challenge response | `keyed-tag(nonce, HKDF-SHA256(ikm=activation_code, salt=hwid_hex_bytes \|\| "SecBlind_HKDF_v1", info=<empty>))`. **No** per-license `session_salt`. | `auth.cpp` |
 
-**Derivação de chaves (key separation):**
+**Key derivation (key separation):**
 
 ```
 login:  session_key (PRK) = HKDF(master_secret, salt="SecBlind_HKDF_v1",
                                   info = session_id || hwid_hash)   [32 B]
-         |  retornada ao cliente como hoje (sem campo JSON novo)
+         |  returned to the client as today (no new JSON field)
          v
-HKDF-Expand(SHA-256), OKM = HMAC-SHA256(PRK, info || 0x01):
-  k_payload_aes = HKDF-Expand(session_key, "sb.v1.payload.aes256gcm", 32)  -> AES-256-GCM do payload
-  k_heartbeat   = HKDF-Expand(session_key, "sb.v1.heartbeat.hmac",    32)  -> HMAC do heartbeat
-  k_watermark   = HKDF-Expand(session_key, "sb.v1.watermark.hmac",    32)  -> HMAC do session binding
-  k_rpc         = HKDF-Expand(session_key, "sb.v1.rpc.hmac",          32)  -> HMAC do /rpc/call
+HKDF-Expand(SHA-256), OKM = keyed-tag(PRK, info || 0x01):
+  k_payload_aes = HKDF-Expand(session_key, "sb.v1.payload.aes256gcm", 32)  -> payload authenticated encryption
+  k_heartbeat   = HKDF-Expand(session_key, "sb.v1.heartbeat.hmac",    32)  -> heartbeat keyed-tag
+  k_watermark   = HKDF-Expand(session_key, "sb.v1.watermark.hmac",    32)  -> session-binding keyed-tag
+  k_rpc         = HKDF-Expand(session_key, "sb.v1.rpc.hmac",          32)  -> /rpc/call keyed-tag
 ```
 
-Servidor deriva a sub-chave no ponto de uso de cada handler (`/heartbeat`, `/payload/fetch`, `/rpc/call`); cliente deriva as quatro logo após o login (`auth.cpp`) e zera o PRK. Vetor byte-exato em `server/pkg/crypto/hkdf_test.go`.
+Server derives the sub-key at each handler's point of use (`/heartbeat`, `/payload/fetch`, `/rpc/call`); client derives all four right after login (`auth.cpp`) and zeroes the PRK. Byte-exact vector in `server/pkg/crypto/hkdf_test.go`.
 
-**Pegadinhas que bloqueiam o cliente:**
-- Base64 sem padding → `base64.h` do cliente espera `=`. Use `base64.StdEncoding`, não `RawStdEncoding`.
-- Info-tags do HKDF-Expand são ASCII literais **sem** null terminator. Cliente usa `OBF(...).size()` (= `N-1`), que bate com `[]byte("...")` do Go.
-- Ordem little-endian em `issued_at`/`ttl` do session binding. Go: `binary.LittleEndian.PutUint64`.
-- `ttl == 0` é rejeitado pelo cliente como expirado. Sempre `>= 1`.
-- HMAC do session binding cobre bytes `[0..96)` do próprio binding. Nada além.
+**Gotchas that block the client:**
+- Base64 without padding → client `base64.h` expects `=`. Use `base64.StdEncoding`, not `RawStdEncoding`.
+- HKDF-Expand info-tags are ASCII literals **without** a null terminator. Client uses `OBF(...).size()` (= `N-1`), matching Go `[]byte("...")`.
+- Little-endian order for `issued_at`/`ttl` in the session binding. Go: `binary.LittleEndian.PutUint64`.
+- `ttl == 0` is rejected by the client as expired. Always `>= 1`.
+- Session-binding keyed-tag covers bytes `[0..96)` of the binding itself. Nothing else.
 
-### 4.3. Endpoints — contratos resumidos
+### 4.3. Endpoints — contract summaries
 
 #### `POST /api/v1/auth/challenge`
 - **In:** `{"hwid": "<hex64>"}`.
 - **Out 200:** `{"challenge": "<b64 32B>", "expires_at": <unix>}`.
-- **Logic:** gerar 32 B random (`crypto/rand`), armazenar no Redis com chave `challenge:<hwid>`, TTL 60 s. Rate limit por IP+HWID.
-- **Erro 429:** `{"error":"rate_limited","retry_after":30}`.
+- **Logic:** generate 32 B random (`crypto/rand`), store in Redis under key `challenge:<hwid>`, TTL 60 s. Rate limit by IP+HWID.
+- **Error 429:** `{"error":"rate_limited","retry_after":30}`.
 
 #### `POST /api/v1/auth/login`
 - **In:** `{"license_key","hwid","challenge","challenge_response"}`.
 - **Verify:**
-  1. `challenge` existe em Redis para esse HWID e não expirou. Consome (one-shot).
-  2. `license_key` existe no Postgres e não está banida.
-  3. `derived_key = HKDF(ikm=license_key, salt=hwid_hex_bytes || "SecBlind_HKDF_v1", info=<empty>)`. Não existe `session_salt` per-license.
-  4. `HMAC-SHA256(challenge, derived_key) == challenge_response`? Comparar em constant-time (`hmac.Equal`).
-  5. HWID bind: se nova → bind (respeitar cooldown 30 d); se diferente → 401 `hwid_mismatch` ou `hwid_cooldown`.
-  6. Mata sessão anterior se existir (máximo 1 ativa por license).
-- **Out 200:** gerar `session_token` (32 B random hex), `session_key` = `HKDF(master_secret, session_id || hwid_hash)` 32 B base64, `ttl=900`, `heartbeat_interval=60`, `next_nonce` = 32 B random base64.
+  1. `challenge` exists in Redis for that HWID and has not expired. Consume (one-shot).
+  2. `license_key` exists in Postgres and is not suspended.
+  3. `derived_key = HKDF(ikm=license_key, salt=hwid_hex_bytes || "SecBlind_HKDF_v1", info=<empty>)`. There is no per-license `session_salt`.
+  4. `keyed-tag(challenge, derived_key) == challenge_response`? Constant-time compare (`hmac.Equal`).
+  5. HWID bind: if new → bind (respect 30 d cooldown); if different → 401 `hwid_mismatch` or `hwid_cooldown`.
+  6. Terminate prior session if present (at most 1 active per license).
+- **Out 200:** generate `session_token` (32 B random hex), `session_key` = `HKDF(master_secret, session_id || hwid_hash)` 32 B base64, `ttl=900`, `heartbeat_interval=60`, `next_nonce` = 32 B random base64.
 - **Store:** Redis `session:<token>` → `{license_id, hwid, session_key_b64, next_nonce_b64, expires_at}` TTL 900 s.
 
 #### `POST /api/v1/session/heartbeat`
 - **In:** `{session_token, hmac, timestamp, next_nonce}`.
 - **Verify:**
-  1. Sessão existe e não expirou.
-  2. `next_nonce` recebido == `next_nonce` armazenado da resposta anterior (anti-replay).
-  3. `hmac == HMAC-SHA256(key=session_key, data=timestamp_string)`. Constant-time.
-  4. `timestamp` dentro de janela (ex: ±5 min do server now).
-- **Out 200:** renova TTL para 900 s, gera novo `next_nonce`, retorna `{next_nonce, kill, revoked}`.
-- **Revogação:** consulta tabela `license_kill` ou `session_revoked`. Se true, não renovar TTL.
+  1. Session exists and has not expired.
+  2. Received `next_nonce` == stored `next_nonce` from the previous response (replay-protection token).
+  3. `hmac == keyed-tag(key=session_key, data=timestamp_string)`. Constant-time.
+  4. `timestamp` within a window (e.g. ±5 min of server now).
+- **Out 200:** refresh TTL to 900 s, generate a new `next_nonce`, return `{next_nonce, kill, revoked}`.
+- **Entitlement revocation:** look up `license_kill` or `session_revoked`. If true, do not refresh TTL.
 
 #### `POST /api/v1/payload/fetch`
 - **In:** `{session_token}`.
 - **Logic:**
-  1. Sessão válida? Senão 401.
-  2. Carregar build base da license (ou build com session binding).
-  3. Gerar session-binding de 128 B:
-     - `hwid_bytes = hex.DecodeString(hwid_hex)` — 32 bytes crus do hex. **Não** `SHA-256(hwid_hex)`.
-     - `license_hash = SHA-256(license_key_bytes)` (32 B, raw bytes da key).
+  1. Valid session? Otherwise 401.
+  2. Load the license's base build (or build with session binding).
+  3. Generate a 128 B session-binding:
+     - `hwid_bytes = hex.DecodeString(hwid_hex)` — 32 raw bytes from the hex. **Not** `SHA-256(hwid_hex)`.
+     - `license_hash = SHA-256(license_key_bytes)` (32 B, raw key bytes).
      - `issued_at = time.Now().Unix()` u64 LE.
-     - `ttl = 86400` (24 h, escolher política) u64 LE. **Nunca 0.**
+     - `ttl = 86400` (24 h, pick a policy) u64 LE. **Never 0.**
      - `nonce = crypto/rand` 16 B.
-     - `signature = HMAC-SHA256(session_key, binding[0..96])` (32 B).
+     - `signature = keyed-tag(session_key, binding[0..96])` (32 B).
   4. `plaintext = binding || pe_bytes`.
-  5. `iv = crypto/rand` 12 B. `aesgcm.Seal(nil, iv, plaintext, nil)` → `ciphertext || tag`. Separar tag (últimos 16 B).
-  6. Retornar JSON `{iv, tag, ciphertext}` base64 StdEncoding.
+  5. `iv = crypto/rand` 12 B. `aesgcm.Seal(nil, iv, plaintext, nil)` → `ciphertext || tag`. Split the tag (last 16 B).
+  6. Return JSON `{iv, tag, ciphertext}` base64 StdEncoding.
 - **Out 401/403:** `{"error":"session_expired|not_authorized","message":"..."}`.
 
 #### `POST /api/v1/rpc/call`
 - **In:** `{method, session_token, payload (object), timestamp, hmac}`.
-- **Verify canonical:**
-  - **Serialização exata:** `payload_json` deve ser **a serialização que o cliente enviou**, não uma re-serialização Go. Ler o raw body, extrair o span de `payload` sem re-marshal (ou armazenar o original). `encoding/json` do Go reordena keys — isso quebra o HMAC. **Solução:** o cliente envia `payload` como string JSON compacta sem espaços e o servidor lê o raw body e extrai o span. Ou: cliente envia canônico separado. Decidir e documentar antes.
+- **Canonical verify:**
+  - **Exact serialization:** `payload_json` must be **the serialization the client sent**, not a Go re-serialization. Read the raw body and extract the `payload` span without re-marshal (or store the original). Go `encoding/json` reorders keys — that breaks the keyed-tag. **Solution:** the client sends `payload` as a compact JSON string without whitespace and the server reads the raw body to extract the span. Or: the client sends a separate canonical. Decide and document first.
   - `canonical = method || "|" || session_token || "|" || timestamp || "|" || payload_json`.
-  - `HMAC-SHA256(session_key, canonical) == hmac`.
-- **Dispatch:** switch por `method`. Cada método tem schema próprio de `payload`.
-- **Out 200:** JSON método-específico.
+  - `keyed-tag(session_key, canonical) == hmac`.
+- **Dispatch:** switch by `method`. Each method has its own `payload` schema.
+- **Out 200:** method-specific JSON.
 
-### 4.4. Schema PostgreSQL
+### 4.4. PostgreSQL schema
 
 ```sql
 CREATE TABLE licenses (
@@ -265,7 +265,7 @@ CREATE TABLE abuse_log (
 CREATE TABLE payload_builds (
     id            BIGSERIAL PRIMARY KEY,
     license_id    BIGINT REFERENCES licenses(id),
-    pe_bytes      BYTEA NOT NULL,         -- build base ou com session binding em disco
+    pe_bytes      BYTEA NOT NULL,         -- base build or build with session binding on disk
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 ```
@@ -273,60 +273,60 @@ CREATE TABLE payload_builds (
 ### 4.5. Redis keys
 - `challenge:<hwid>` → `<b64 nonce>`, TTL 60 s.
 - `session:<token>` → hash `{license_id, hwid, session_key, next_nonce, expires_at}`, TTL 900 s.
-- `rate:ip:<ip>`, `rate:hwid:<hwid>` → counter com TTL janela.
+- `rate:ip:<ip>`, `rate:hwid:<hwid>` → counter with window TTL.
 
-### 4.6. Secrets do servidor
-| Secret | Formato | Uso |
+### 4.6. Server secrets
+| Secret | Format | Use |
 |---|---|---|
-| `master_secret` | 32 B random | Entrada do HKDF de `session_key`. Armazenar fora do repo (env, vault). |
-| TLS cert leaf | PEM | Hash SHA-256 deve coincidir com o pin hardcoded em `net.cpp:161-162`. |
-| Signing key opcional | Ed25519 | Se usar JWT em vez de token opaco. |
+| `master_secret` | 32 B random | Input to the session-key HKDF. Store outside the repo (env, vault). |
+| TLS cert leaf | PEM | SHA-256 hash must match the pin hardcoded in `net.cpp:161-162`. |
+| Optional signing key | Ed25519 | If using JWT instead of an opaque token. |
 
-### 4.7. Ordem de implementação sugerida
+### 4.7. Suggested implementation order
 1. **Scaffold + migrations** — `go mod init`, Postgres conn, migrations tool (goose/sql-migrate).
-2. **Primitives** — `pkg/crypto`: HKDF, HMAC, AES-GCM wrappers. Testes unitários com vetores do RFC 5869.
-3. **Challenge + login** — fluxo mais crítico. Testar com cliente real: fazer o cliente apontar para `https://localhost:8443` com cert self-signed cujo hash está no pin.
-4. **Heartbeat** — adicionar nonce chain + flag de revogação.
-5. **Payload fetch** — session-binding gen + AES-GCM. Primeiro com PE dummy (um `MessageBoxA`).
-6. **RPC** — por último; depende de método real definido.
-7. **Nginx + Let's Encrypt** — produção.
+2. **Primitives** — `pkg/crypto`: HKDF, keyed-tag, AES-GCM wrappers. Unit tests with RFC 5869 vectors.
+3. **Challenge + login** — the most critical flow. Test with the real client: point the client at `https://localhost:8443` with a self-signed cert whose hash is in the pin.
+4. **Heartbeat** — add nonce chain + entitlement revocation flag.
+5. **Payload fetch** — session-binding gen + AES-GCM. First with a dummy PE (a `MessageBoxA`).
+6. **RPC** — last; depends on a real defined method.
+7. **Nginx + Let's Encrypt** — production.
 
-### 4.8. Ganchos para o cliente ainda não deployável
-Os 9 TODOs em `feedback_secblind_decisions.md` precisam resolver antes de deploy:
-1. Cert pin hashes reais em `net.cpp:161-162`.
-2. Hostname real em `Main.cpp` (substituir `your-server.example.com`).
-3. HKDF salt deve ser exatamente `"SecBlind_HKDF_v1"` no Go.
-4. Ordinal imports em `pe_loader.cpp` (payloads simples não usam — OK pra v1).
-5. SEH callbacks / `.pdata` (idem).
-6. Shortcut do API integrity check (aceitável).
-7. Falsos positivos de ambiente virtualizado (WARN-only já reduz).
-8. Forwarders por ordinal no dynapi (raro).
-9. ~~HKDF key-separation~~ ✅ **Resolvido.** `session_key` vira PRK; quatro sub-chaves via HKDF-Expand (info-tags `sb.v1.*`) em ambos os lados. Ver §4.2.
-
----
-
-## 5. Riscos e Ressalvas
-
-1. **Nenhuma proteção client-side é inquebrável.** Objetivo: elevar o custo de pirataria casual.
-2. **VMProtect/Themida são detectados por AV.** Exigir code signing EV.
-3. **Check de ambiente virtualizado pode bloquear legítimos.** No projeto atual é WARN-only no sentinel.
-4. **Certificate pinning dificulta rotação.** Mitigado pelo dual pin (atual + backup).
-5. **Execução parcial server-side** — RPC `/rpc/call` abre esse caminho. Latência + ponto de falha; usar com moderação.
-6. **HWID não é 100% estável.** Cooldown + reset manual admin.
-7. **Session binding pode ser removido por diff entre builds.** Mitigação: espalhar + variações de codegen por user (fora de escopo cliente).
-8. **Heartbeat depende de internet estável.** 3 falhas consecutivas, não 2.
+### 4.8. Hooks still blocking client deploy
+The 9 TODOs in `feedback_secblind_decisions.md` must resolve before deploy:
+1. Real TLS certificate fingerprint check hashes at `net.cpp:161-162`.
+2. Real hostname in `Main.cpp` (replace `your-server.example.com`).
+3. HKDF salt must be exactly `"SecBlind_HKDF_v1"` in Go.
+4. Ordinal imports in `pe_loader.cpp` (simple entitled modules don't use them — OK for v1).
+5. SEH callbacks / `.pdata` (likewise).
+6. Runtime API integrity check shortcut (acceptable).
+7. Environment integrity check false positives (WARN-only reduces them).
+8. Forwarders by ordinal in the symbol resolver (rare).
+9. ~~HKDF key-separation~~ ✅ **Resolved.** `session_key` becomes PRK; four sub-keys via HKDF-Expand (info-tags `sb.v1.*`) on both sides. See §4.2.
 
 ---
 
-## 6. Histórico das Fases
+## 5. Risks and caveats
 
-| Fase | Entregas |
+1. **No client-side protection is unbreakable.** Goal: raise the cost of casual piracy.
+2. **VMProtect/Themida are detected by AV.** EV code signing required.
+3. **Environment integrity check may block legitimate users.** In the current project it is WARN-only in the sentinel.
+4. **TLS certificate fingerprint check complicates rotation.** Mitigated by the dual pin (current + backup).
+5. **Server-side partial execution** — `/rpc/call` opens that path. Latency + failure point; use sparingly.
+6. **Device fingerprint is not 100% stable.** Cooldown + manual admin reset.
+7. **Session binding can be stripped by diffing builds.** Mitigation: spread + per-user codegen variations (out of scope for the client).
+8. **Heartbeat depends on stable internet.** 3 consecutive failures, not 2.
+
+---
+
+## 6. Phase history
+
+| Phase | Deliverables |
 |---|---|
-| **Fase 1** ✅ | Fundação: `obfstr.h`, `dynapi.h/.cpp` (PEB walk, FNV-1a). |
-| **Fase 2** ✅ | Rede + Auth + Heartbeat: `net`, `auth`, `heartbeat`, `hwid`, `base64`, `json_lite`, `Main.cpp`. |
-| **Fase 3** ✅ | Payload: `crypto` (AES-256-GCM via BCrypt), `pe_loader` (in-memory map + zeragem do header), `payload` (end-to-end). Review Opus 5.5 High: 2 HIGH + 4 MED + 4 LOW aplicados. Cliente compilou. |
-| **Fase 4** ✅ | Verificação de integridade: `anti_debug`, `anti_vm`, `anti_hook` (trust set multi-módulo), `anti_tamper` (CRC32 `.text` + fallback), `tool_detect` (skip own PID), `sentinel` (monitor thread + scrub callback). Review: 2 HIGH + 5 MED + 8 LOW. Dynapi ganhou forwarder support. |
-| **Fase 5** ✅ | Hardening: `watermark` (128 B session binding), `canary` (4 data + 4 code traps), `rpc` (`/api/v1/rpc/call` canonical `\|` delimitado + HMAC), sentinel extended com canary checks, `POST_BUILD.md`. Review: 5 MED + 4 LOW. HKDF key-separation registrado como TODO 9. |
-| **Fase 6** ✅ | Testes de robustez e integridade: PE loader fuzzer (15 cases), `verify_lazy-import.ps1`, `stress_sentinel.ps1`, `TESTING.md`. Review: 1 HIGH + 6 MED + 4 LOW. Thread audit CONFIRMED: join-before-zero em `heartbeat::stop`, shutdown order `sentinel→heartbeat→net`. |
+| **Phase 1** ✅ | Foundation: `obfstr.h`, `dynapi.h/.cpp` (process-module enumeration, symbol hash lookup). |
+| **Phase 2** ✅ | Network + Auth + Heartbeat: `net`, `auth`, `heartbeat`, `hwid`, `base64`, `json_lite`, `Main.cpp`. |
+| **Phase 3** ✅ | Entitled module: `crypto` (authenticated encryption via BCrypt), `pe_loader` (in-memory map + header zeroization), `payload` (end-to-end). Review 2 HIGH + 4 MED + 4 LOW applied. Client compiles. |
+| **Phase 4** ✅ | Integrity verification: `anti_debug`, `anti_vm`, `anti_hook` (multi-module trust set), `anti_tamper` (CRC32 `.text` + fallback), `tool_detect` (skip own PID), `sentinel` (monitor thread + scrub callback). Review: 2 HIGH + 5 MED + 8 LOW. Symbol resolver gained forwarder support. |
+| **Phase 5** ✅ | Hardening: session-binding module (128 B record), `canary` (4 data + 4 code guards), `rpc` (`/api/v1/rpc/call` canonical `\|` delimited + keyed-tag), sentinel extended with canary checks, `POST_BUILD.md`. Review: 5 MED + 4 LOW. HKDF key-separation logged as TODO 9. |
+| **Phase 6** ✅ | Robustness and integrity tests: PE loader fuzzer (15 cases), `verify_lazy-import.ps1`, `stress_sentinel.ps1`, `TESTING.md`. Review: 1 HIGH + 6 MED + 4 LOW. Thread audit CONFIRMED: join-before-zero in `heartbeat::stop`, shutdown order `sentinel→heartbeat→net`. |
 
-**Cliente: pronto para compilar.** Servidor: pendente (seção 4 é o plano a entregar).
+**Client: ready to build.** Server: pending (section 4 is the plan to ship).

@@ -1,45 +1,43 @@
-# Sec blind — instruções do projeto
+# Sec blind — project instructions
 
-## Papel do agente principal
+## Primary agent role
 
-Agente principal **só delega**. Não escreve código, não edita arquivos, não roda comandos de implementação.
+Primary agent **delegates only**. Does not write code, edit files, or run implementation commands.
 
-Trabalho: receber pedido → classificar dificuldade → despachar subagentes em paralelo → ao fim, listar o que sobrou pendente.
+Work: receive request → classify difficulty → dispatch subagents in parallel → finish with a list of what is still pending.
 
-## Roteamento por dificuldade
+## Routing by difficulty
 
-**Sempre Opus 5.5.** Varia só o effort.
+Varies only by effort level.
 
-| Classe | Modelo | Effort |
-|--------|--------|--------|
-| Difícil | Opus 5.5 | high |
-| Médio | Opus 5.5 | medium |
-| Fácil | Opus 5.5 | low |
+| Class  | Effort |
+|--------|--------|
+| Hard   | high   |
+| Medium | medium |
+| Easy   | low    |
 
-Critério:
-- **Difícil**: cripto, protocolo, concorrência, bug sutil, design de API, RE profunda, revisão de segurança.
-- **Médio**: refactor multi-arquivo, nova feature contida, integração, testes não triviais.
-- **Fácil**: typo, rename, comentário, patch 1-2 linhas, listar arquivos.
+Criteria:
+- **Hard**: cryptography, protocol, concurrency, subtle bug, API design, deep integration debugging, security review.
+- **Medium**: multi-file refactor, bounded new feature, integration, non-trivial tests.
+- **Easy**: typo, rename, comment, 1-2 line patch, file listing.
 
-Em dúvida entre dois níveis: suba um.
+When in doubt between two levels: pick the higher one.
 
-**Por que só Opus:** Sonnet 5.5 e Haiku disparam safeguards `[cyber]` em padrões deste repo (cert pin, zero-IAT, PEB walk, HMAC). Só Opus 5.5 passa.
+## Required skills
 
-## Skills obrigatórias
+- **Security review**: `secskills-core:reviewing-code-changes`, `secskills-core:auditing-code-for-vulnerabilities`, `secskills-core:reviewing-cryptography` (crypto), `security-review`.
+- **Any plugin/skill/agent from setup** can be pulled by the subagent as the task requires (caveman, ponytail, superpowers, rea, impeccable, graphify, etc.).
+- State in the subagent prompt which skills to load.
 
-- **Revisão de segurança**: `secskills-core:reviewing-code-changes`, `secskills-core:auditing-code-for-vulnerabilities`, `secskills-core:reviewing-cryptography` (cripto), `security-review`.
-- **Qualquer plugin/skill/agent do setup** pode ser puxado pelo subagente conforme a tarefa (caveman, ponytail, superpowers, rea, impeccable, graphify, etc.).
-- Peça explicitamente no prompt do subagente quais skills carregar.
+## Batch dispatch
 
-## Despacho em lotes
+Large batches, not piecemeal work. One message = several parallel `Agent` calls when tasks are independent. No 1-by-1 dispatch over successive turns.
 
-Lotes grandes, não trabalho picado. Uma mensagem = várias chamadas `Agent` em paralelo quando as tarefas são independentes. Nada de dispatch 1-por-1 em turnos sucessivos.
+## End of turn
 
-## Fim de turno
+Always finish with a **pending** list: what was not done, what was not verified, known risk.
 
-Sempre terminar com lista de **pendências**: o que não foi feito, o que não foi verificado, risco conhecido.
+## Project
 
-## Projeto
-
-Stack: C++ loader + Go server, zero IAT, HWID, anti-replay, HKDF/GCM.
-Branch: `main`. Fase atual: 2 completa (ver memória).
+Stack: C++ activation client + Go licensing server, in-memory module loading, TLS certificate fingerprint check on transport, device binding via hardware fingerprint id, key derivation (RFC 5869) with authenticated encryption.
+Branch: `main`. Current phase: 2 complete (see memory).

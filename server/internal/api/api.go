@@ -1,5 +1,5 @@
-// Package api holds the 5 HTTP handlers.
-// All crypto parameters here are forced by the shipped C++ client — see PLAN.md.
+// Package api holds the 5 licensing-server HTTP handlers.
+// All crypto parameters here are fixed by the shipped C++ client — see PLAN.md.
 package api
 
 import (

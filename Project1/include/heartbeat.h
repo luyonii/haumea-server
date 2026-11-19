@@ -1,6 +1,7 @@
 #pragma once
-// Periodic heartbeat thread. Sends HMAC-signed timestamps to the server.
-// Detects kill, revocation, or connectivity loss.
+// Periodic heartbeat thread. Sends timestamps authenticated with a keyed
+// message integrity tag to the licensing server. Detects remote
+// license-suspension flags, entitlement revocation, or connectivity loss.
 
 #include <cstdint>
 

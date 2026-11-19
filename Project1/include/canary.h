@@ -1,6 +1,7 @@
 #pragma once
-// Two-layer tripwire: data canaries (volatile guards) + code canaries
-// (magic constants embedded in trap functions, CRC32 fingerprint).
+// Two-layer runtime guard: data-side volatile guards + code-side magic
+// constants embedded in guard functions (CRC32 fingerprint of their
+// prologue).
 
 #include <cstdint>
 

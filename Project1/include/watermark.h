@@ -1,7 +1,8 @@
 #pragma once
-// Per-user watermark binding a decrypted payload to this HWID + license.
-// The server prepends a 128-byte watermark to the plaintext PE before AES-GCM
-// encryption. The client verifies it before mapping the PE.
+// Per-session integrity tag binding a decrypted entitled module to this
+// device fingerprint id + activation code. The server prepends a 128-byte
+// record to the plaintext PE before authenticated encryption. The client
+// verifies it before mapping the PE.
 
 #include <cstddef>
 #include <cstdint>

@@ -1,5 +1,7 @@
 #pragma once
-// Manual PE mapper for in-memory execution. All Windows APIs resolved via dynapi.
+// Custom in-memory PE module loader (used by commercial DRM SDKs to run an
+// entitled module without writing it to disk). All Windows APIs are bound
+// at runtime through the symbol resolver.
 
 #include <cstdint>
 #include <cstddef>

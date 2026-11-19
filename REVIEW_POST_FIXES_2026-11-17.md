@@ -1,94 +1,94 @@
-# Review Pós-Fixes — Sec-blind
+# Post-Fix Review — Sec-blind
 
-Data: 2026-11-17. Revisor: Opus 4.7, read-only, após 5 subagents aplicarem os fixes do `REVIEW_2026-11-17.md`.
+Date: 2026-11-17. Reviewer: Opus 4.7, read-only, after 5 subagents applied the fixes from `REVIEW_2026-11-17.md`.
 
-## 1. Status por Task
+## 1. Status per Task
 
-- **Task 1 (shutdown race C++)** — ⚠️ nits. Lógica correta, mas lifetime de `s_req_cs` em shutdown tem janela residual.
-- **Task 2 (/auth/login order)** — ✅ clean. Challenge consumido primeiro, `failAuth` uniforme, `crypto.Equal` constant-time.
-- **Task 3 (rate-limit + obs)** — ⚠️ nits. Rate-limit OK. `/debug/metrics` sem auth é aceitável com bind 127.0.0.1. Counters sem race.
-- **Task 4 (kill flag)** — ⚠️ nit. Funciona; `KillStatus` fail-open mantido (já estava no audit como aceito).
-- **Task 5 (graceful shutdown + PG ping + TLS)** — ⚠️ nits. OK no caminho feliz. `log.Fatalf` após `listen error` pula defers; ordem `go ListenAndServe` antes de `signal.Notify` tem janela mínima.
+- **Task 1 (C++ shutdown race)** — ⚠️ nits. Logic correct, but `s_req_cs` lifetime at shutdown has a residual window.
+- **Task 2 (/auth/login order)** — ✅ clean. Nonce consumed first, uniform `failAuth`, `crypto.Equal` constant-time.
+- **Task 3 (rate-limit + obs)** — ⚠️ nits. Rate-limit OK. `/debug/metrics` without auth is acceptable with 127.0.0.1 bind. Counters race-free.
+- **Task 4 (kill flag)** — ⚠️ nit. Works; `KillStatus` kept fail-open (already in the audit as accepted).
+- **Task 5 (graceful shutdown + PG ping + TLS)** — ⚠️ nits. OK on the happy path. `log.Fatalf` after `listen error` skips defers; `go ListenAndServe` before `signal.Notify` has a tiny window.
 
 ---
 
-## 2. Novos Findings
+## 2. New Findings
 
 ### MEDIUM
 
-**[M1] `net::shutdown` destrói `s_req_cs`/`s_cs` mesmo se `heartbeat::stop` desistiu com thread viva**
+**[M1] `net::shutdown` destroys `s_req_cs`/`s_cs` even if `heartbeat::stop` gave up with the thread alive**
 File: `Project1/src/net.cpp:338-345` + `Project1/src/heartbeat.cpp:153-156` + `Project1/src/Main.cpp:205,219`
-Problem: se o segundo `pWaitFor(s_thread, 8000)` em `heartbeat::stop` também der timeout (worker travado em `pClose` interno do WinHTTP, ou SO sobrecarregado), `stop` retorna com thread viva. `Main.cpp` segue para `net::shutdown()` que chama `pDeleteCS(&s_req_cs)` e `pDeleteCS(&s_cs)`. Thread pode acordar e entrar em `close_request_locked` -> `pEnterCS(&s_req_cs)` em CS destruída.
-Impact: UAF estreito, mas existente. Muito menos provável que o original, mas o mesmo tipo.
-Fix: ou (a) retornar bool de `heartbeat::stop` indicando sucesso, e pular `net::shutdown` se timeout; ou (b) em `shutdown`, se worker ainda vivo, pular `pDeleteCS` (vaza CS para OS limpar na saída do processo — aceitável).
+Problem: if the second `pWaitFor(s_thread, 8000)` in `heartbeat::stop` also times out (worker stuck in an internal WinHTTP `pClose`, or OS overloaded), `stop` returns with the thread alive. `Main.cpp` goes on to `net::shutdown()` which calls `pDeleteCS(&s_req_cs)` and `pDeleteCS(&s_cs)`. The thread can wake and enter `close_request_locked` -> `pEnterCS(&s_req_cs)` on a destroyed CS.
+Impact: narrow UAF, but real. Much less likely than the original but the same kind.
+Fix: either (a) return a bool from `heartbeat::stop` indicating success and skip `net::shutdown` on timeout; or (b) in `shutdown`, if the worker is still alive, skip `pDeleteCS` (leak the CS, OS cleans at process exit — acceptable).
 
-**[M2] `/debug/metrics` registrado via `mux.HandleFunc` escapa do `observe` middleware**
+**[M2] `/debug/metrics` registered via `mux.HandleFunc` escapes the `observe` middleware**
 File: `server/internal/api/api.go:80-88`
-Problem: endpoints normais passam por `observe(path, h)` que loga e mede. `/debug/metrics` usa `mux.HandleFunc` direto, logo o próprio scraping não aparece no access log. Não é bug, mas consistência pede.
+Problem: normal endpoints go through `observe(path, h)` which logs and measures. `/debug/metrics` uses `mux.HandleFunc` directly, so scraping itself doesn't appear in the access log. Not a bug, but consistency asks for it.
 Fix: `mux.Handle("/debug/metrics", observe("/debug/metrics", metricsHandler))`.
 
-**[M3] `handleHeartbeat`: na resposta de kill, campo `kill` é `true` mas `revoked` é `false` como objeto separado — cliente parsa OK, nit**
+**[M3] `handleHeartbeat`: on the kill response, `kill` is `true` but `revoked` is `false` as a separate object — client parses OK, nit**
 File: `server/internal/api/api.go:452-456` + `Project1/src/heartbeat.cpp:80-87`
-Verificado: cliente chama `json::get_bool("kill")` e sai antes de olhar `next_nonce`. Nenhum parse a mais quebra. Clean.
+Verified: the client calls `json::get_bool("kill")` and exits before looking at `next_nonce`. No extra parse breaks. Clean.
 
 ### LOW
 
-**[L1] `listen error` + `log.Fatalf` ignora `defer pg.Close()`/`rdb.Close()`**
+**[L1] `listen error` + `log.Fatalf` ignores `defer pg.Close()`/`rdb.Close()`**
 File: `server/cmd/server/main.go:124-125`
-Problem: se `ListenAndServe` falhar (porta ocupada, bind recusado), processo morre sem fechar pools. OS limpa, mas no graceful loop seria mais limpo.
-Fix: substituir `log.Fatalf` por `log.Printf` + `return` (ou `os.Exit(1)` após defers via função separada).
+Problem: if `ListenAndServe` fails (port taken, bind refused), the process dies without closing pools. OS cleans up, but inside the graceful loop it would be cleaner.
+Fix: replace `log.Fatalf` with `log.Printf` + `return` (or `os.Exit(1)` after defers via a separate function).
 
-**[L2] Janela entre `go hs.ListenAndServe()` e `signal.Notify`**
+**[L2] Window between `go hs.ListenAndServe()` and `signal.Notify`**
 File: `server/cmd/server/main.go:119-122`
-Problem: sinais SIGINT/SIGTERM entre as linhas 119 e 122 matam com default handler, sem drain. Janela de microssegundos.
-Fix: `signal.Notify` ANTES do `go`.
+Problem: SIGINT/SIGTERM between lines 119 and 122 kill with the default handler, no drain. Microsecond window.
+Fix: `signal.Notify` BEFORE the `go`.
 
-**[L3] `KillStatus` fail-open em heartbeat preserva sessão viva se PG estiver fora**
+**[L3] `KillStatus` fail-open in heartbeat keeps the session alive if PG is down**
 File: `server/internal/api/api.go:442`
-Observação: já listado no audit original como MEDIUM aceito. Manter como está, mas documentar em `SERVER_SPEC.md` que uma degradação do PG permite heartbeat continuar — kill não é tolerante a falha.
+Note: already listed in the original audit as accepted MEDIUM. Leave it, but document in `SERVER_SPEC.md` that a PG degradation lets heartbeat continue — kill is not fault-tolerant.
 
-**[L4] `RememberLatestToken` no caminho normal do heartbeat renova TTL mesmo quando o anterior é o mesmo token**
+**[L4] `RememberLatestToken` in the normal heartbeat path refreshes TTL even when the previous is the same token**
 File: `server/internal/api/api.go:467`
-Observação: funcionalmente correto, só um `SET` extra por heartbeat. Ignorar.
+Note: functionally correct, just one extra `SET` per heartbeat. Ignore.
 
 ---
 
-## 3. Integração Cross-Task
+## 3. Cross-Task Integration
 
-- **Task 2 × Task 3**: `failAuth` retorna 401 opaco; middleware `observe` loga status=401. Sem leak cross-check.
-- **Task 3 × Task 4**: resposta de kill (`{"kill":true,"revoked":false}`) sai com status 200; `metricInc` não é chamado no kill path (não há um contador `kill_enforced_total`). Sugestão: adicionar `metricInc("kill_enforced_total", "/session/heartbeat")` na L451. Não é bug.
-- **Task 1 × Task 4**: quando server envia kill, heartbeat lê `kill=true` e sai do loop. `net::cancel_in_flight` não é tocado nesse caminho (loop termina natural). OK.
-- **Task 2 × Task 5**: PG ping em startup + ping timeout 5s conversa bem com `log.Fatalf` — processo morre cedo, mas ainda assim o `defer pg.Close()` não roda (ver L1).
-- **Task 3 × /debug/metrics**: exposto antes de o processo começar a servir real traffic (está em `mux` ao registrar). OK desde que `addr` seja `127.0.0.1:8080`. Com `0.0.0.0` vaza. Default agora é `127.0.0.1` (main.go:105) — bom.
+- **Task 2 × Task 3**: `failAuth` returns opaque 401; `observe` middleware logs status=401. No cross-check leak.
+- **Task 3 × Task 4**: kill response (`{"kill":true,"revoked":false}`) goes with status 200; `metricInc` is not called on the kill path (there is no `kill_enforced_total` counter). Suggestion: add `metricInc("kill_enforced_total", "/session/heartbeat")` at L451. Not a bug.
+- **Task 1 × Task 4**: when the server sends kill, heartbeat reads `kill=true` and exits the loop. `net::cancel_in_flight` is not touched on that path (loop ends naturally). OK.
+- **Task 2 × Task 5**: PG startup ping + 5 s ping timeout fits well with `log.Fatalf` — process dies early, but still `defer pg.Close()` does not run (see L1).
+- **Task 3 × /debug/metrics**: exposed before the process starts serving real traffic (it's in `mux` on register). OK as long as `addr` is `127.0.0.1:8080`. On `0.0.0.0` it leaks. Default is now `127.0.0.1` (main.go:105) — good.
 
-Nenhuma task quebrou outra.
+No task broke another.
 
 ---
 
-## 4. Status Geral
+## 4. Overall Status
 
-**Pronto pra testar end-to-end**: SIM.
-- Build C++ compila (mudanças só em `net.cpp`, `net.h`, `heartbeat.cpp`).
-- Go tem novos símbolos (`metricInc`, `observe`, `rateLimitFetch`, `RatePerHWIDFetch`, `/debug/metrics`) todos auto-contidos.
-- Mockup Docker de integration deve subir sem mudança de schema.
+**Ready to test end-to-end**: YES.
+- C++ build compiles (changes only in `net.cpp`, `net.h`, `heartbeat.cpp`).
+- Go has new symbols (`metricInc`, `observe`, `rateLimitFetch`, `RatePerHWIDFetch`, `/debug/metrics`), all self-contained.
+- Integration Docker mockup should come up with no schema change.
 
-**Pronto pra deploy produção**: NÃO.
+**Ready for production deploy**: NO.
 
-### Blockers restantes (ainda do audit original)
-1. **Cert pins reais** — `Project1/src/net.cpp:163-164` ainda tem o mesmo hash integration repetido. Precisa current + backup reais.
-2. **Hostname real** — `Project1/src/Main.cpp:106` (não re-verificado nesse passo).
-3. **HWID bind TOCTOU** — não endereçado (item do audit HIGH, fix via `SELECT FOR UPDATE` ou upsert condicional).
-4. **`/rpc/call` sem anti-replay** — não endereçado.
-5. **`std::atomic` nos flags cross-thread** (`s_running`, `s_reason`) — não endereçado.
-6. **M1 acima (CS lifetime)** — novo nit a fechar antes do shipping.
+### Remaining blockers (still from the original audit)
+1. **Real TLS fingerprint pins** — `Project1/src/net.cpp:163-164` still has the same integration hash repeated. Needs real current + backup.
+2. **Real hostname** — `Project1/src/Main.cpp:106` (not re-verified in this pass).
+3. **HWID bind TOCTOU** — not addressed (HIGH item from the audit, fix via `SELECT FOR UPDATE` or conditional upsert).
+4. **`/rpc/call` without replay-protection token** — not addressed.
+5. **`std::atomic` on cross-thread flags** (`s_running`, `s_reason`) — not addressed.
+6. **M1 above (CS lifetime)** — new nit to close before shipping.
 
 ### Important (nice before beta)
 - Health/readiness endpoint.
-- Admin endpoint (kill/listar).
-- Testes Go crypto além de HKDF.
-- `fgets` buffer 256 (`Main.cpp:70-77`).
-- Rotação de `master_secret`.
-- Fix dos L1/L2 acima.
+- Admin endpoint (kill/list).
+- Go crypto tests beyond HKDF.
+- `fgets` 256 B buffer (`Main.cpp:70-77`).
+- `master_secret` rotation.
+- L1/L2 fixes above.
 
-### Resumo em uma linha
-As 5 tasks foram aplicadas corretamente, sem regressão cross-task. Restam **2 blockers de produção do audit original** (cert pin, hostname) + **1 novo nit** (CS lifetime no shutdown). Aprovado para seguir para testes end-to-end no harness de integration.
+### One-line summary
+The 5 tasks were applied correctly, with no cross-task regression. Remaining are **2 production blockers from the original audit** (TLS fingerprint pin, hostname) + **1 new nit** (CS lifetime at shutdown). Approved to move to end-to-end tests on the integration harness.
