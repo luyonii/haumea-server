@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
@@ -70,11 +71,27 @@ func loadConfig(path string) (*config, error) {
 	return &c, nil
 }
 
-func resolveSecret(v string) ([]byte, error) {
-	if strings.HasPrefix(v, "env:") {
-		v = os.Getenv(v[4:])
+// resolveEnv expands a value of the form "env:NAME" from the environment.
+// A missing or empty variable is a hard error: a secret must never silently
+// degrade to "" (or to the literal "env:NAME") at startup.
+func resolveEnv(field, v string) (string, error) {
+	if !strings.HasPrefix(v, "env:") {
+		return v, nil
 	}
-	return hex.DecodeString(v)
+	name := v[4:]
+	got := os.Getenv(name)
+	if got == "" {
+		return "", fmt.Errorf("%s: env var %s is unset or empty", field, name)
+	}
+	return got, nil
+}
+
+func resolveSecret(field, v string) ([]byte, error) {
+	s, err := resolveEnv(field, v)
+	if err != nil {
+		return nil, err
+	}
+	return hex.DecodeString(s)
 }
 
 func toRouteLimits(in map[string]rateRoute) api.RouteLimits {
@@ -110,8 +127,29 @@ func main() {
 	store.Logf = func(format string, args ...any) { logger.Warnf(format, args...) }
 	defer closeLog()
 
-	master, err := resolveSecret(cfg.MasterSecret)
-	if err != nil || len(master) < 32 {
+	// Every sensitive field goes through the same "env:NAME" resolution, so a
+	// config documenting env: indirection never ships as a literal credential.
+	for _, f := range []struct {
+		name string
+		p    *string
+	}{
+		{"admin_token", &cfg.AdminToken},
+		{"debug_token", &cfg.DebugToken},
+		{"postgres_dsn", &cfg.PostgresDSN},
+		{"redis_addr", &cfg.RedisAddr},
+	} {
+		v, err := resolveEnv(f.name, *f.p)
+		if err != nil {
+			logger.Fatal(err.Error())
+		}
+		*f.p = v
+	}
+
+	master, err := resolveSecret("master_secret", cfg.MasterSecret)
+	if err != nil {
+		logger.Fatalf("master_secret: %v", err)
+	}
+	if len(master) < 32 {
 		logger.Fatal("master_secret must be hex of at least 32 bytes")
 	}
 
