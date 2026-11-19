@@ -1,6 +1,7 @@
-# Generate self-signed leaf cert for secblind.local, export DER+PEM+key,
-# print SHA-256 of the DER (what the client pins).
-# Run from any PowerShell (no VS tools required). Admin NOT required.
+# Generate CA-marked self-signed leaf cert for secblind.local (basicConstraints
+# CA:TRUE critical, so Windows schannel accepts it in LocalMachine\Root for
+# WinHTTP integration tests), export DER+PEM+key, print SHA-256 of the DER
+# (what the client pins). Run from any PowerShell. Admin NOT required.
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -11,49 +12,38 @@ New-Item -ItemType Directory -Force -Path $certDir | Out-Null
 
 $cn = 'secblind.local'
 
-# Create in CurrentUser\My, 825 days, RSA 2048 (fine for TLS 1.3 pin test).
-$cert = New-SelfSignedCertificate `
-    -Subject "CN=$cn" `
-    -DnsName $cn `
-    -KeyAlgorithm RSA -KeyLength 2048 `
-    -HashAlgorithm SHA256 `
-    -NotAfter (Get-Date).AddDays(825) `
-    -CertStoreLocation 'Cert:\CurrentUser\My' `
-    -KeyExportPolicy Exportable `
-    -Provider 'Microsoft Software Key Storage Provider'
-
 $derPath = Join-Path $certDir 'leaf.der'
-$crtPath = Join-Path $certDir 'leaf.crt'   # PEM for nginx
-$keyPath = Join-Path $certDir 'leaf.key'   # PEM key for nginx
-$pfxPath = Join-Path $certDir 'leaf.pfx'
+$crtPath = Join-Path $certDir 'leaf.crt'
+$keyPath = Join-Path $certDir 'leaf.key'
+$cfgPath = Join-Path $certDir 'openssl.cnf'
 
-# DER (what the client pins)
-[IO.File]::WriteAllBytes($derPath, $cert.RawData)
+$cfg = @"
+[req]
+distinguished_name = dn
+x509_extensions = v3
+prompt = no
+[dn]
+CN = $cn
+[v3]
+basicConstraints = critical, CA:TRUE
+keyUsage = critical, digitalSignature, keyCertSign, keyEncipherment
+extendedKeyUsage = serverAuth
+subjectAltName = DNS:$cn
+"@
+Set-Content -Path $cfgPath -Value $cfg -Encoding ascii
 
-# PEM cert
-$b64 = [Convert]::ToBase64String($cert.RawData, 'InsertLineBreaks')
-"-----BEGIN CERTIFICATE-----`n$b64`n-----END CERTIFICATE-----" |
-    Set-Content -Path $crtPath -Encoding ascii
+docker run --rm -v "${certDir}:/c" alpine/openssl req -x509 -newkey rsa:2048 -nodes `
+    -keyout /c/leaf.key -out /c/leaf.crt -days 825 -config /c/openssl.cnf -outform PEM | Out-Null
+if ($LASTEXITCODE -ne 0) { Remove-Item $cfgPath -Force -ErrorAction SilentlyContinue; throw "openssl req failed (exit=$LASTEXITCODE)" }
 
-# Export PFX, then use openssl in a throwaway container to extract the PEM
-# private key. PowerShell 5.1 ships .NET 4.8 which lacks ExportPkcs8PrivateKey.
-$pwd = ConvertTo-SecureString -String 'secblind-dev' -Force -AsPlainText
-Export-PfxCertificate -Cert $cert -FilePath $pfxPath -Password $pwd | Out-Null
+docker run --rm -v "${certDir}:/c" alpine/openssl x509 -in /c/leaf.crt -outform DER -out /c/leaf.der | Out-Null
+if ($LASTEXITCODE -ne 0) { Remove-Item $cfgPath -Force -ErrorAction SilentlyContinue; throw "openssl DER conversion failed (exit=$LASTEXITCODE)" }
 
-docker run --rm -v "${certDir}:/cert" alpine/openssl pkcs12 `
-    -in /cert/leaf.pfx -nocerts -nodes -out /cert/leaf.key `
-    -passin pass:secblind-dev | Out-Null
-if ($LASTEXITCODE -ne 0) { throw "openssl conversion failed (exit=$LASTEXITCODE)" }
-
-Remove-Item $pfxPath -Force
+Remove-Item $cfgPath -Force
 
 # SHA-256 of leaf DER
-$sha = [System.Security.Cryptography.SHA256]::Create()
-$hashBytes = $sha.ComputeHash($cert.RawData)
-$hex = -join ($hashBytes | ForEach-Object { '{0:x2}' -f $_ })
-
-# Clean up cert store entry (we only needed the files)
-Remove-Item "Cert:\CurrentUser\My\$($cert.Thumbprint)" -Force
+$hashBytes = (Get-FileHash $derPath -Algorithm SHA256).Hash
+$hex = $hashBytes.ToLower()
 
 Write-Host ""
 Write-Host "Cert written to: $crtPath"
