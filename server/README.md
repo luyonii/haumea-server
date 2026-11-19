@@ -43,7 +43,13 @@ psql -U secblind -d secblind -c "INSERT INTO payload_builds (license_id, pe_byte
 
 ## Run
 
+Kill any old `server.exe` first, or the stale binary keeps `:8443` bound and the
+fresh build never comes up:
+
 ```powershell
+# Build fresh and run (from server\)
+Get-Process server -ErrorAction SilentlyContinue | Stop-Process -Force
+go build .\cmd\server
 .\server.exe .\config.yaml
 ```
 
