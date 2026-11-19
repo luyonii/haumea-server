@@ -124,6 +124,10 @@ static void collect_cpuid(cpuid_block& out) {
     __cpuid(out.regs + 0, 0);          // leaf 0: vendor
     __cpuid(out.regs + 4, 1);          // leaf 1: model / stepping / features
     __cpuid(out.regs + 8, 0x80000001); // extended features
+
+    // leaf 1 EBX[31:24] is the Initial APIC ID: it reports the logical CPU the
+    // thread happens to run on, so it changes run to run and broke HWID stability.
+    out.regs[5] &= 0x00FFFFFF;
 }
 
 // ---- SHA-256 via Windows CNG (bcrypt.dll, loaded dynamically) -----------
