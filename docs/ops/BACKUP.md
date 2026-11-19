@@ -2,6 +2,15 @@
 
 Runbook de backup/restore. Assume host Linux target, cliente admin via Windows/PowerShell.
 
+## Encryption at rest (obrigatorio)
+
+Todos os backups (Postgres dump, Redis snapshot) saem cifrados com **age** antes de tocar disco/offsite. Dependencia extra no host de backup: binario `age` (https://github.com/FiloSottile/age) — `apt install age`, `brew install age`, ou `go install filippo.io/age/cmd/age@latest`.
+
+- Gerar par (offline, host separado): `age-keygen -o backup-key.txt`. A linha `# public key: age1...` vai pros scripts via `BACKUP_RECIPIENT`; o arquivo (chave privada) fica offline (cofre fisico/HSM/Vault).
+- Env `BACKUP_RECIPIENT` obrigatorio. Scripts recusam rodar sem ele — nao geram plaintext por default.
+- Checksum (`sha256sum`) cobre o ciphertext. Verificacao nao exige a privada.
+- Restore: `age -d -i backup-key.txt file.age > file` antes do `pg_restore`/copia pro `/var/lib/redis/`.
+
 ## Postgres
 
 ### Daily logical dump
@@ -32,8 +41,8 @@ Runbook de backup/restore. Assume host Linux target, cliente admin via Windows/P
 # Dropar e recriar DB
 psql -d postgres -c "DROP DATABASE secblind;"
 psql -d postgres -c "CREATE DATABASE secblind OWNER secblind;"
-# Restore
-pg_restore -d secblind --no-owner --role=secblind /var/backup/postgres/daily/<dump>
+# Decrypt + restore (streaming, sem plaintext em disco)
+age -d -i backup-key.txt /var/backup/postgres/daily/<dump>.age | pg_restore -d secblind --no-owner --role=secblind
 ```
 
 ### Restore — PITR (basebackup + WAL)
@@ -80,8 +89,8 @@ dir /var/lib/redis
 ### Restore
 ```bash
 systemctl stop redis
-cp /path/to/backup/dump.rdb /var/lib/redis/dump.rdb
-cp /path/to/backup/appendonly.aof /var/lib/redis/appendonly.aof
+age -d -i backup-key.txt /path/to/backup/dump.rdb.age > /var/lib/redis/dump.rdb
+age -d -i backup-key.txt /path/to/backup/appendonly.aof.age > /var/lib/redis/appendonly.aof
 chown redis:redis /var/lib/redis/*
 systemctl start redis
 redis-cli -a $REDIS_PASSWORD DBSIZE

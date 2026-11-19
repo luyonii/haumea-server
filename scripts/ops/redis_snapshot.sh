@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# redis_snapshot.sh — BGSAVE + rsync offsite.
-# Env: REDIS_PASSWORD obrigatorio. REDIS_HOST (default 127.0.0.1), REDIS_DIR (default /var/lib/redis).
+# redis_snapshot.sh — BGSAVE + encrypt (age) + rsync offsite.
+# needs age installed and BACKUP_RECIPIENT env set to age pubkey (age1...). Private key stays offline.
+# Env: REDIS_PASSWORD, OFFSITE, BACKUP_RECIPIENT. REDIS_HOST/REDIS_DIR opcionais.
 # OFFSITE: destino rsync, e.g. "user@host:/backup/redis/" ou "s3-mount/redis/".
 set -euo pipefail
 
 : "${REDIS_PASSWORD:?REDIS_PASSWORD env obrigatorio}"
 : "${OFFSITE:?OFFSITE destino rsync obrigatorio}"
+: "${BACKUP_RECIPIENT:?BACKUP_RECIPIENT (age pubkey) obrigatorio — nao exportar plaintext}"
 REDIS_HOST="${REDIS_HOST:-127.0.0.1}"
 REDIS_DIR="${REDIS_DIR:-/var/lib/redis}"
 
@@ -26,8 +28,16 @@ for _ in $(seq 1 60); do
 done
 [ "$NOW" = "$LAST_BEFORE" ] && { echo "BGSAVE nao concluiu em 120s" >&2; exit 1; }
 
-# Copia dump.rdb + appendonly.aof para offsite.
-rsync -a --partial "$REDIS_DIR/dump.rdb" "$REDIS_DIR/appendonly.aof" "$OFFSITE/" 2>/dev/null || \
-    rsync -a --partial "$REDIS_DIR/dump.rdb" "$OFFSITE/"
+# Cifra em tmp dir e envia offsite. Plaintext nao sai do host.
+STAGE="$(mktemp -d)"
+chmod 700 "$STAGE"
+trap 'rm -rf "$STAGE"; unset REDISCLI_AUTH' EXIT
+
+age -r "$BACKUP_RECIPIENT" -o "$STAGE/dump.rdb.age" < "$REDIS_DIR/dump.rdb"
+if [ -f "$REDIS_DIR/appendonly.aof" ]; then
+    age -r "$BACKUP_RECIPIENT" -o "$STAGE/appendonly.aof.age" < "$REDIS_DIR/appendonly.aof"
+fi
+
+rsync -a --partial "$STAGE"/*.age "$OFFSITE/"
 
 echo "snapshot ok -> $OFFSITE"

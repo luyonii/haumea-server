@@ -1,5 +1,6 @@
-# redis_snapshot.ps1 — BGSAVE + copia offsite via robocopy/rsync.
-# Env: REDIS_PASSWORD, OFFSITE (caminho UNC/local destino). REDIS_HOST, REDIS_DIR opcionais.
+# redis_snapshot.ps1 — BGSAVE + encrypt (age) + copia offsite via robocopy.
+# needs age installed and BACKUP_RECIPIENT env set to age pubkey (age1...). Private key stays offline.
+# Env: REDIS_PASSWORD, OFFSITE, BACKUP_RECIPIENT. REDIS_HOST, REDIS_DIR opcionais.
 [CmdletBinding()]
 param(
     [string]$RedisHost   = $(if ($env:REDIS_HOST) { $env:REDIS_HOST } else { '127.0.0.1' }),
@@ -8,8 +9,9 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-if (-not $env:REDIS_PASSWORD) { throw 'REDIS_PASSWORD env obrigatorio' }
-if (-not $Offsite)            { throw 'OFFSITE env/param obrigatorio' }
+if (-not $env:REDIS_PASSWORD)       { throw 'REDIS_PASSWORD env obrigatorio' }
+if (-not $Offsite)                  { throw 'OFFSITE env/param obrigatorio' }
+if (-not $env:BACKUP_RECIPIENT)     { throw 'BACKUP_RECIPIENT (age pubkey) obrigatorio — nao exportar plaintext' }
 
 # redis-cli le REDISCLI_AUTH do ambiente: senha fora de argv/Get-Process.
 $env:REDISCLI_AUTH = $env:REDIS_PASSWORD
@@ -33,9 +35,24 @@ try {
     }
     if (-not $ok) { throw 'BGSAVE nao concluiu em 120s' }
 
-    # Copia arquivos (robocopy nao falha em "nothing to copy").
-    robocopy $RedisDir $Offsite 'dump.rdb' 'appendonly.aof' /NJH /NJS /NP /R:2 /W:5 | Out-Null
-    Write-Output "snapshot ok -> $Offsite"
+    # Cifra em stage local, envia .age para offsite. Plaintext nao sai do host.
+    $stage = Join-Path ([System.IO.Path]::GetTempPath()) ("redis-snap-" + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Force -Path $stage | Out-Null
+    try {
+        foreach ($name in @('dump.rdb','appendonly.aof')) {
+            $src = Join-Path $RedisDir $name
+            if (Test-Path $src) {
+                & age -r $env:BACKUP_RECIPIENT -o (Join-Path $stage "$name.age") -- $src
+                if ($LASTEXITCODE -ne 0) { throw "age falhou em $name (exit $LASTEXITCODE)" }
+            }
+        }
+        robocopy $stage $Offsite '*.age' /NJH /NJS /NP /R:2 /W:5 | Out-Null
+        if ($LASTEXITCODE -ge 8) { throw "robocopy falhou (exit $LASTEXITCODE)" }
+        Write-Output "snapshot ok -> $Offsite"
+    }
+    finally {
+        Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
+    }
 }
 finally {
     Remove-Item Env:REDISCLI_AUTH -ErrorAction SilentlyContinue
