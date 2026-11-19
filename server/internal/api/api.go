@@ -370,17 +370,20 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "server_error", "db")
 		return
 	}
+	// Timing balance: run KillStatus + isRevoked on every license-exists fail
+	// path so banned/killed/revoked/bad_challenge_response look identical to
+	// an external observer (same DB + Redis calls, same response).
+	killed, _ := s.PG.KillStatus(ctx, lic.ID)
+	revoked := s.isRevoked(ctx, lic.ID)
 	if lic.Banned {
-		// timing balance: match KillStatus cost of the killed/bad_resp paths.
-		_, _ = s.PG.KillStatus(ctx, lic.ID)
 		failAuth(&lic.ID, "banned")
 		return
 	}
-	if killed, _ := s.PG.KillStatus(ctx, lic.ID); killed {
+	if killed {
 		failAuth(&lic.ID, "killed")
 		return
 	}
-	if s.isRevoked(ctx, lic.ID) {
+	if revoked {
 		failAuth(&lic.ID, "revoked")
 		return
 	}
@@ -391,11 +394,13 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 5) HWID bind + cooldown (atomic: see store.HWIDBindIfAllowed)
+	// 5) HWID bind + cooldown (atomic: see store.HWIDBindIfAllowed).
+	// Cooldown rejection returns the generic invalid_credentials response so
+	// an attacker cannot use it as an oracle for "license + HMAC correct".
+	// Internal LogAbuse keeps ops visibility.
 	if err := s.PG.HWIDBindIfAllowed(ctx, lic.ID, req.HWID, s.Cfg.HWIDCooldown); err != nil {
 		if errors.Is(err, store.ErrHWIDCooldown) {
-			s.PG.LogAbuse(ctx, &lic.ID, ip, "hwid_cooldown")
-			writeErr(w, http.StatusUnauthorized, "hwid_cooldown", "hwid change within cooldown")
+			failAuth(&lic.ID, "hwid_cooldown")
 			return
 		}
 		writeErr(w, http.StatusInternalServerError, "server_error", "bind")
