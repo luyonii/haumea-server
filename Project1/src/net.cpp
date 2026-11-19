@@ -164,8 +164,9 @@ static bool verify_cert_pin(void* hRequest) {
     // mesmo valor nos dois slots = sem rotação segura de cert.
     // pin_leaf_current — hash do cert de testes `secblind.local` (harness de integração); substituir pelo hash do cert real de prod no deploy
     auto pin1 = OBF("822696bb26c49b6269b46d41457587c112f9b1248c4c5b322604ae66bcdfbdca");
-    // pin_leaf_backup — substituir no deploy
-    auto pin2 = OBF("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+    // pin_leaf_backup — shortcut: pin2 == pin1 until rotation key is provisioned;
+    // substituir pelo hash do leaf de backup antes do deploy
+    auto pin2 = OBF("822696bb26c49b6269b46d41457587c112f9b1248c4c5b322604ae66bcdfbdca");
 
     return strcmp(hash, pin1.c_str()) == 0
         || strcmp(hash, pin2.c_str()) == 0;
