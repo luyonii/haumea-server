@@ -793,6 +793,15 @@ func (s *Server) handleRPC(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Cap the Prometheus method label to the whitelist. req.Method passes
+	// isValidRPCMethod (64-char alnum/_/.), so emitting it raw would let any
+	// session-key holder explode counter cardinality via /metrics.
+	methodLabel := "unknown"
+	switch req.Method {
+	case "ping":
+		methodLabel = "ping"
+	}
+
 	// Anti-replay: timestamp is unique per (session, second); SET NX burns it.
 	tokPfx := req.Token
 	if len(tokPfx) > 8 {
@@ -809,7 +818,7 @@ func (s *Server) handleRPC(w http.ResponseWriter, r *http.Request) {
 	}
 	if !ok {
 		metricInc("rpc_replay_blocked", "/rpc/call")
-		rpcCallsTotal.WithLabelValues(req.Method, "replay").Inc()
+		rpcCallsTotal.WithLabelValues(methodLabel, "replay").Inc()
 		L().Warnw("rpc_replay_blocked",
 			"request_id", RequestID(ctx),
 			"token_prefix", tokPfx,
@@ -823,10 +832,10 @@ func (s *Server) handleRPC(w http.ResponseWriter, r *http.Request) {
 	// Dispatch.
 	switch req.Method {
 	case "ping":
-		rpcCallsTotal.WithLabelValues(req.Method, "ok").Inc()
+		rpcCallsTotal.WithLabelValues(methodLabel, "ok").Inc()
 		writeJSON(w, http.StatusOK, map[string]any{"pong": true})
 	default:
-		rpcCallsTotal.WithLabelValues(req.Method, "unknown_method").Inc()
+		rpcCallsTotal.WithLabelValues(methodLabel, "unknown_method").Inc()
 		writeErr(w, http.StatusNotFound, "unknown_method", req.Method)
 	}
 }
