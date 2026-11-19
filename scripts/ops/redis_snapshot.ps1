@@ -11,23 +11,32 @@ $ErrorActionPreference = 'Stop'
 if (-not $env:REDIS_PASSWORD) { throw 'REDIS_PASSWORD env obrigatorio' }
 if (-not $Offsite)            { throw 'OFFSITE env/param obrigatorio' }
 
+# redis-cli le REDISCLI_AUTH do ambiente: senha fora de argv/Get-Process.
+$env:REDISCLI_AUTH = $env:REDIS_PASSWORD
+Remove-Item Env:REDIS_PASSWORD
+
 function Invoke-Redis($args) {
-    $out = & redis-cli -h $RedisHost -a $env:REDIS_PASSWORD --no-auth-warning @args
+    $out = & redis-cli -h $RedisHost --no-auth-warning @args
     if ($LASTEXITCODE -ne 0) { throw "redis-cli falhou: $args" }
     return $out
 }
 
-$before = Invoke-Redis @('LASTSAVE')
-Invoke-Redis @('BGSAVE') | Out-Null
+try {
+    $before = Invoke-Redis @('LASTSAVE')
+    Invoke-Redis @('BGSAVE') | Out-Null
 
-# Poll ate 120s.
-$ok = $false
-for ($i = 0; $i -lt 60; $i++) {
-    Start-Sleep -Seconds 2
-    if ((Invoke-Redis @('LASTSAVE')) -ne $before) { $ok = $true; break }
+    # Poll ate 120s.
+    $ok = $false
+    for ($i = 0; $i -lt 60; $i++) {
+        Start-Sleep -Seconds 2
+        if ((Invoke-Redis @('LASTSAVE')) -ne $before) { $ok = $true; break }
+    }
+    if (-not $ok) { throw 'BGSAVE nao concluiu em 120s' }
+
+    # Copia arquivos (robocopy nao falha em "nothing to copy").
+    robocopy $RedisDir $Offsite 'dump.rdb' 'appendonly.aof' /NJH /NJS /NP /R:2 /W:5 | Out-Null
+    Write-Output "snapshot ok -> $Offsite"
 }
-if (-not $ok) { throw 'BGSAVE nao concluiu em 120s' }
-
-# Copia arquivos (robocopy nao falha em "nothing to copy").
-robocopy $RedisDir $Offsite 'dump.rdb' 'appendonly.aof' /NJH /NJS /NP /R:2 /W:5 | Out-Null
-Write-Output "snapshot ok -> $Offsite"
+finally {
+    Remove-Item Env:REDISCLI_AUTH -ErrorAction SilentlyContinue
+}
