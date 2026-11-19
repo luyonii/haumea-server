@@ -54,3 +54,6 @@ integration/dummy_payload/*.lib
 # --- OS ---
 Thumbs.db
 .DS_Store
+
+# --- Tool output ---
+graphify-out/
