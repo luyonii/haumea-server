@@ -76,6 +76,39 @@ All under `/api/v1`. See `..\SERVER_SPEC.md` for shapes.
 - `POST /payload/fetch`
 - `POST /rpc/call` (method `ping` implemented)
 
+## Admin API
+
+Separate private listener (`admin_addr` in `config.yaml`, default loopback-only).
+Auth: `X-Admin-Token: $SB_ADMIN_TOKEN` (constant-time compare).
+
+Create license (body optional):
+
+```powershell
+curl -k -X POST https://127.0.0.1:8443/api/v1/admin/license `
+  -H "X-Admin-Token: $env:SB_ADMIN_TOKEN" `
+  -H "Content-Type: application/json" `
+  -d '{"prefix":"SB","note":"discord_user:123"}'
+# -> 201 { "license_key": "SB-ABCDEF0123456789", "license_id": 42, "created_at": "..." }
+```
+
+Status:
+
+```powershell
+curl -k https://127.0.0.1:8443/api/v1/admin/license/SB-ABCDEF0123456789 `
+  -H "X-Admin-Token: $env:SB_ADMIN_TOKEN"
+# -> 200 { license_key, license_id, banned, revoked, revoked_at, hwid_bound,
+#         hwid_hex (truncated 16), bound_at, killed, created_at, note }
+```
+
+Revoke:
+
+```powershell
+curl -k -X POST https://127.0.0.1:8443/api/v1/admin/revoke `
+  -H "X-Admin-Token: $env:SB_ADMIN_TOKEN" `
+  -H "Content-Type: application/json" `
+  -d '{"license_key":"SB-ABCDEF0123456789"}'
+```
+
 ## Deviations from `SERVER_PLAN.md`
 
 Driven by the shipped client source; see `PLAN.md`:

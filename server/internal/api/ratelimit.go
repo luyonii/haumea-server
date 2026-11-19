@@ -26,6 +26,9 @@ var routeKeyForPath = map[string]string{
 	"/api/v1/payload/fetch":    "payload_fetch",
 	"/api/v1/rpc/call":         "rpc_call",
 	"/api/v1/admin/revoke":     "admin_revoke",
+	"/api/v1/admin/license":    "admin_create",
+	// GET /api/v1/admin/license/{key} is not rate-limited: admin is trusted
+	// and the mux path label carries the pattern, not the key.
 }
 
 // limiterBucket holds the per-(route,ip) limiter and its last-seen time

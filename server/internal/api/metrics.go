@@ -39,6 +39,9 @@ var (
 	licenseRevokedTotal = prometheus.NewCounter(
 		prometheus.CounterOpts{Name: "license_revoked_total", Help: "Admin revocations completed."},
 	)
+	licenseCreatedTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{Name: "license_created_total", Help: "Admin license creations completed."},
+	)
 	rpcCallsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{Name: "rpc_calls_total", Help: "RPC calls by method and result."},
 		[]string{"method", "result"},
@@ -67,6 +70,7 @@ func init() {
 		authLoginTotal,
 		authFailTotal,
 		licenseRevokedTotal,
+		licenseCreatedTotal,
 		rpcCallsTotal,
 		heartbeatTotal,
 		legacyEvents,

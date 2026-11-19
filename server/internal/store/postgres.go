@@ -38,6 +38,55 @@ func OpenPG(ctx context.Context, dsn string) (*PG, error) {
 
 func (p *PG) Close() { p.Pool.Close() }
 
+// LicenseStatus is the shape returned by the admin GET /license/{key} endpoint.
+// Nil time fields mean the condition is not set (no revoke, no hwid bind, etc.).
+type LicenseStatus struct {
+	ID        int64
+	Key       string
+	Banned    bool
+	Revoked   bool
+	RevokedAt *time.Time
+	HWID      *string
+	BoundAt   *time.Time
+	Killed    bool
+	CreatedAt time.Time
+	Note      *string
+}
+
+// InsertLicense creates a new license row. Returns the new id + created_at.
+// On license_key uniqueness violation (SQLSTATE 23505) the caller can retry.
+func (p *PG) InsertLicense(ctx context.Context, key string, note *string) (int64, time.Time, error) {
+	var id int64
+	var createdAt time.Time
+	err := p.Pool.QueryRow(ctx,
+		`INSERT INTO licenses (license_key, note) VALUES ($1, $2)
+		 RETURNING id, created_at`, key, note,
+	).Scan(&id, &createdAt)
+	return id, createdAt, err
+}
+
+// LicenseStatusByKey returns a joined status snapshot for admin inspection.
+func (p *PG) LicenseStatusByKey(ctx context.Context, key string) (*LicenseStatus, error) {
+	var s LicenseStatus
+	err := p.Pool.QueryRow(ctx,
+		`SELECT l.id, l.license_key, l.banned, l.revoked_at, l.created_at, l.note,
+		        b.hwid, b.bound_at, k.license_id IS NOT NULL
+		   FROM licenses l
+		   LEFT JOIN hwid_binds b   ON b.license_id = l.id
+		   LEFT JOIN license_kill k ON k.license_id = l.id
+		  WHERE l.license_key = $1`, key,
+	).Scan(&s.ID, &s.Key, &s.Banned, &s.RevokedAt, &s.CreatedAt, &s.Note,
+		&s.HWID, &s.BoundAt, &s.Killed)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	s.Revoked = s.RevokedAt != nil
+	return &s, nil
+}
+
 func (p *PG) LicenseByKey(ctx context.Context, key string) (*License, error) {
 	var l License
 	err := p.Pool.QueryRow(ctx,

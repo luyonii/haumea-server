@@ -2,11 +2,16 @@ package api
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/subtle"
+	"encoding/hex"
 	"errors"
 	"net/http"
+	"regexp"
+	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/secblind/server/internal/store"
 )
 
@@ -36,6 +41,155 @@ func (s *Server) RegisterAdmin(mux *http.ServeMux, token string) {
 		mux.Handle(path, observe(path, adminAuth(token, h)))
 	}
 	reg("/api/v1/admin/revoke", s.handleAdminRevoke)
+	reg("/api/v1/admin/license", s.handleAdminCreateLicense)
+	reg("/api/v1/admin/license/{key}", s.handleAdminLicenseStatus)
+}
+
+var adminPrefixRe = regexp.MustCompile(`^[A-Z0-9]{1,8}$`)
+
+// generateLicenseKey returns "<prefix>-<16 hex uppercase>" (8 random bytes).
+func generateLicenseKey(prefix string) (string, error) {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return prefix + "-" + strings.ToUpper(hex.EncodeToString(b[:])), nil
+}
+
+func (s *Server) handleAdminCreateLicense(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "POST only")
+		return
+	}
+	var req struct {
+		Prefix string `json:"prefix"`
+		Note   string `json:"note"`
+	}
+	// Empty body is allowed: treat as defaults.
+	if r.ContentLength != 0 {
+		if err := readJSON(w, r, &req); err != nil {
+			writeErr(w, http.StatusBadRequest, "bad_request", "invalid json")
+			return
+		}
+	}
+	prefix := strings.TrimSpace(req.Prefix)
+	if prefix == "" {
+		prefix = "SB"
+	}
+	if !adminPrefixRe.MatchString(prefix) {
+		writeErr(w, http.StatusBadRequest, "bad_request", "invalid prefix")
+		return
+	}
+	// prefix(<=8) + "-" + 16 hex = <=25 chars, well under the 64 cap.
+	var notePtr *string
+	if n := strings.TrimSpace(req.Note); n != "" {
+		if len(n) > 512 {
+			writeErr(w, http.StatusBadRequest, "bad_request", "note too long")
+			return
+		}
+		notePtr = &n
+	}
+
+	ctx := r.Context()
+	var (
+		key       string
+		id        int64
+		createdAt time.Time
+	)
+	// One retry on license_key uniqueness collision (SQLSTATE 23505).
+	for attempt := 0; attempt < 2; attempt++ {
+		k, err := generateLicenseKey(prefix)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "server_error", "rand failed")
+			return
+		}
+		id, createdAt, err = s.PG.InsertLicense(ctx, k, notePtr)
+		if err == nil {
+			key = k
+			break
+		}
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			continue
+		}
+		writeErr(w, http.StatusInternalServerError, "server_error", "db")
+		return
+	}
+	if key == "" {
+		writeErr(w, http.StatusInternalServerError, "server_error", "key collision")
+		return
+	}
+	licenseCreatedTotal.Inc()
+	keyPfx := key
+	if len(keyPfx) > 8 {
+		keyPfx = keyPfx[:8]
+	}
+	L().Infow("license_created",
+		"request_id", RequestID(ctx),
+		"license_id", id,
+		"license_prefix", keyPfx,
+	)
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"license_key": key,
+		"license_id":  id,
+		"created_at":  createdAt.UTC().Format(time.RFC3339Nano),
+	})
+}
+
+func (s *Server) handleAdminLicenseStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "GET only")
+		return
+	}
+	key := r.PathValue("key")
+	if key == "" {
+		// Fallback: Go <1.22 or when pattern was registered without {key}.
+		key = strings.TrimPrefix(r.URL.Path, "/api/v1/admin/license/")
+	}
+	if key == "" || len(key) > 64 {
+		writeErr(w, http.StatusBadRequest, "bad_request", "license key required")
+		return
+	}
+	ctx := r.Context()
+	st, err := s.PG.LicenseStatusByKey(ctx, key)
+	if errors.Is(err, store.ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "not_found", "unknown license")
+		return
+	}
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "server_error", "db")
+		return
+	}
+	out := map[string]any{
+		"license_key": st.Key,
+		"license_id":  st.ID,
+		"banned":      st.Banned,
+		"revoked":     st.Revoked,
+		"revoked_at":  nil,
+		"hwid_bound":  st.HWID != nil,
+		"hwid_hex":    nil,
+		"bound_at":    nil,
+		"killed":      st.Killed,
+		"created_at":  st.CreatedAt.UTC().Format(time.RFC3339Nano),
+		"note":        nil,
+	}
+	if st.RevokedAt != nil {
+		out["revoked_at"] = st.RevokedAt.UTC().Format(time.RFC3339Nano)
+	}
+	if st.HWID != nil {
+		h := *st.HWID
+		if len(h) > 16 {
+			h = h[:16]
+		}
+		out["hwid_hex"] = h
+	}
+	if st.BoundAt != nil {
+		out["bound_at"] = st.BoundAt.UTC().Format(time.RFC3339Nano)
+	}
+	if st.Note != nil {
+		out["note"] = *st.Note
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) handleAdminRevoke(w http.ResponseWriter, r *http.Request) {
