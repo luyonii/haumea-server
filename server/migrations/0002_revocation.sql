@@ -3,7 +3,7 @@
 -- operator panic-button, can be lifted.
 
 ALTER TABLE licenses
-    ADD COLUMN revoked_at TIMESTAMPTZ NULL;
+    ADD COLUMN IF NOT EXISTS revoked_at TIMESTAMPTZ NULL;
 
 CREATE INDEX IF NOT EXISTS licenses_revoked_at_idx
     ON licenses (revoked_at) WHERE revoked_at IS NOT NULL;
