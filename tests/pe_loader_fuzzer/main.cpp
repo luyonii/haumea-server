@@ -315,6 +315,102 @@ static vector<uint8_t> build_import_thunk_overflow_image() {
     return b;
 }
 
+// ---- Extra coverage cases (FileHeader / OptionalHeader gaps) --------------
+
+// NumberOfSections = 97 (one past the PE spec cap of 96).
+static vector<uint8_t> build_sections_97() {
+    auto b = build_valid_skeleton();
+    nt_at(b)->FileHeader.NumberOfSections = 97;
+    return b;
+}
+
+// NumberOfSections = 0xFFFF (worst case).
+static vector<uint8_t> build_sections_ffff() {
+    auto b = build_valid_skeleton();
+    nt_at(b)->FileHeader.NumberOfSections = 0xFFFF;
+    return b;
+}
+
+// SizeOfOptionalHeader = 0 -> != sizeof(IMAGE_OPTIONAL_HEADER64).
+static vector<uint8_t> build_opt_header_size_zero() {
+    auto b = build_valid_skeleton();
+    nt_at(b)->FileHeader.SizeOfOptionalHeader = 0;
+    return b;
+}
+
+// SizeOfOptionalHeader = 0xFFFF (way too large).
+static vector<uint8_t> build_opt_header_size_huge() {
+    auto b = build_valid_skeleton();
+    nt_at(b)->FileHeader.SizeOfOptionalHeader = 0xFFFF;
+    return b;
+}
+
+// Machine = 0 (another non-AMD64 path, distinct from the i386 case).
+static vector<uint8_t> build_machine_zero() {
+    auto b = build_valid_skeleton();
+    nt_at(b)->FileHeader.Machine = 0;
+    return b;
+}
+
+// SizeOfImage < SizeOfHeaders -> rejected post-alloc by the
+// "SizeOfHeaders > image_size" bound check.
+static vector<uint8_t> build_image_smaller_than_headers() {
+    auto b = build_valid_skeleton();
+    nt_at(b)->OptionalHeader.SizeOfImage = 0x100; // < SizeOfHeaders(512)
+    return b;
+}
+
+// AddressOfEntryPoint >= SizeOfImage -> explicit late check.
+static vector<uint8_t> build_entry_point_above_image() {
+    auto b = build_valid_skeleton();
+    nt_at(b)->OptionalHeader.AddressOfEntryPoint = SIZE_OF_IMAGE; // == image_size
+    return b;
+}
+
+// SectionAlignment < 0x1000 -> rejected.
+static vector<uint8_t> build_section_alignment_too_small() {
+    auto b = build_valid_skeleton();
+    nt_at(b)->OptionalHeader.SectionAlignment = 0x200;
+    return b;
+}
+
+// ---- Documentation cases: fields the loader does NOT inspect --------------
+// Each of these produces a maldito PE that the loader currently accepts.
+// They map cleanly rather than crash (no UB), which is what this harness
+// exists to confirm. Treat the "ok" expectation as a documented gap.
+
+// AddressOfEntryPoint = 0 -> loader only rejects AOEP >= image_size.
+static vector<uint8_t> build_entry_point_zero() {
+    auto b = build_valid_skeleton();
+    nt_at(b)->OptionalHeader.AddressOfEntryPoint = 0;
+    return b;
+}
+
+// OptionalHeader.Magic = PE32 (0x10B). Loader validates via
+// SizeOfOptionalHeader == sizeof(IMAGE_OPTIONAL_HEADER64) only; Magic
+// itself is never read.
+static vector<uint8_t> build_opt_magic_pe32() {
+    auto b = build_valid_skeleton();
+    nt_at(b)->OptionalHeader.Magic = IMAGE_NT_OPTIONAL_HDR32_MAGIC;
+    return b;
+}
+
+// Characteristics without IMAGE_FILE_EXECUTABLE_IMAGE. Loader never
+// inspects Characteristics.
+static vector<uint8_t> build_characteristics_no_exe() {
+    auto b = build_valid_skeleton();
+    nt_at(b)->FileHeader.Characteristics = 0;
+    return b;
+}
+
+// NumberOfRvaAndSizes = 0. Loader indexes DataDirectory by fixed indices
+// regardless of this field, so the value has no effect.
+static vector<uint8_t> build_rva_count_zero() {
+    auto b = build_valid_skeleton();
+    nt_at(b)->OptionalHeader.NumberOfRvaAndSizes = 0;
+    return b;
+}
+
 // ---- Larger-section skeleton (for the string-NUL cases) --------------------
 // The 1 KiB skeleton can't stage 512 non-NUL bytes in mapped memory (section
 // raw data is only 512 bytes and VirtualAlloc pages are zero-filled). Grow
@@ -456,6 +552,22 @@ int main() {
         {"virtual_protect_section_overflow",    pe_loader::map_error::protect_failed,      &build_virtual_protect_section_overflow},
         {"virtual_size_overflow",               pe_loader::map_error::protect_failed,      &build_virtual_size_overflow},
         {"section_va_above_image",              pe_loader::map_error::section_copy_failed, &build_section_va_above_image},
+
+        // Extra FileHeader / OptionalHeader coverage.
+        {"number_of_sections_97",               pe_loader::map_error::bad_nt_header,       &build_sections_97},
+        {"number_of_sections_ffff",             pe_loader::map_error::bad_nt_header,       &build_sections_ffff},
+        {"opt_header_size_zero",                pe_loader::map_error::bad_nt_header,       &build_opt_header_size_zero},
+        {"opt_header_size_huge",                pe_loader::map_error::bad_nt_header,       &build_opt_header_size_huge},
+        {"machine_zero",                        pe_loader::map_error::bad_machine,         &build_machine_zero},
+        {"image_smaller_than_headers",          pe_loader::map_error::bad_nt_header,       &build_image_smaller_than_headers},
+        {"entry_point_above_image",             pe_loader::map_error::bad_nt_header,       &build_entry_point_above_image},
+        {"section_alignment_too_small",         pe_loader::map_error::bad_nt_header,       &build_section_alignment_too_small},
+
+        // Documented gaps: loader does not inspect these fields -> maps ok.
+        {"entry_point_zero",                    pe_loader::map_error::ok,                  &build_entry_point_zero},
+        {"opt_magic_pe32",                      pe_loader::map_error::ok,                  &build_opt_magic_pe32},
+        {"characteristics_no_exe",              pe_loader::map_error::ok,                  &build_characteristics_no_exe},
+        {"number_of_rva_and_sizes_zero",        pe_loader::map_error::ok,                  &build_rva_count_zero},
     };
 
     const int total = static_cast<int>(sizeof(cases) / sizeof(*cases));
