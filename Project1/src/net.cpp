@@ -159,14 +159,14 @@ static bool verify_cert_pin(void* hRequest) {
     pCertFree(cert);
     if (!ok) return false;
 
-    // Integration test cert pin (secblind.local self-signed).
-    // Replace AMBOS no deploy por hashes reais distintos (leaf atual + leaf backup);
-    // mesmo valor nos dois slots = sem rotação segura de cert.
-    // pin_leaf_current — hash do cert de testes `secblind.local` (harness de integração); substituir pelo hash do cert real de prod no deploy
+    // Dual-pin: pin1 = live prod leaf, pin2 = provisioned standby for rotation.
+    // Must stay distinct, or the dual-pin rotation buffer is gone.
+    // pin_leaf_current — full-cert DER SHA-256 of the live prod leaf (secblind.local).
     auto pin1 = OBF("635df9031feacc4ebb544432d22ceb5c2289960c1ac5f6a5c6a9edeb6a08fc48");
-    // pin_leaf_backup — shortcut: pin2 == pin1 until rotation key is provisioned;
-    // substituir pelo hash do leaf de backup antes do deploy
-    auto pin2 = OBF("635df9031feacc4ebb544432d22ceb5c2289960c1ac5f6a5c6a9edeb6a08fc48");
+    // pin_leaf_backup — standby cert at VPS /root/.secblind/next.crt, ready for
+    // zero-downtime rotation (integration/scripts/rotate_cert.sh). Full-cert DER
+    // SHA-256, same derivation as pin1 (verify_cert_pin hashes the full cert).
+    auto pin2 = OBF("807908a16ad35316b190fb3c6c5c1d28aa04f7d2efc8b913d6acb107bba77535");
 
     return strcmp(hash, pin1.c_str()) == 0
         || strcmp(hash, pin2.c_str()) == 0;
