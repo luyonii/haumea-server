@@ -18,6 +18,15 @@ constexpr DWORD WHTTP_OPT_CERT_CTX  = 78;         // WINHTTP_OPTION_SERVER_CERT_
 constexpr DWORD WHTTP_QUERY_STATUS  = 19;         // WINHTTP_QUERY_STATUS_CODE
 constexpr DWORD WHTTP_QUERY_NUM     = 0x20000000; // WINHTTP_QUERY_FLAG_NUMBER
 
+// Strict pin-only mode: bypass SChannel chain validation. The manual SPKI pin
+// check below is the ONLY source of truth for cert identity (OWASP MASVS-NETWORK-1).
+// A poisoned CA store cannot pre-authorize a cert whose SPKI hash does not match.
+constexpr DWORD WHTTP_OPT_SECURITY_FLAGS      = 31;         // WINHTTP_OPTION_SECURITY_FLAGS
+constexpr DWORD WHTTP_SEC_IGNORE_UNKNOWN_CA   = 0x00000100; // SECURITY_FLAG_IGNORE_UNKNOWN_CA
+constexpr DWORD WHTTP_SEC_IGNORE_WRONG_USAGE  = 0x00000200; // SECURITY_FLAG_IGNORE_CERT_WRONG_USAGE
+constexpr DWORD WHTTP_SEC_IGNORE_CN_INVALID   = 0x00001000; // SECURITY_FLAG_IGNORE_CERT_CN_INVALID
+constexpr DWORD WHTTP_SEC_IGNORE_DATE_INVALID = 0x00002000; // SECURITY_FLAG_IGNORE_CERT_DATE_INVALID
+
 // Matches CERT_CONTEXT layout — avoids wincrypt.h
 struct cert_ctx {
     DWORD encoding_type;
@@ -285,6 +294,14 @@ response post(const char* path, const std::string& json_body) {
     pEnterCS(&s_req_cs);
     s_req = hReq;
     pLeaveCS(&s_req_cs);
+
+    // Pin-only TLS: skip SChannel chain validation; SPKI pin check below is
+    // the only identity gate (defeats CA-store poisoning).
+    DWORD secFlags = WHTTP_SEC_IGNORE_UNKNOWN_CA
+                   | WHTTP_SEC_IGNORE_WRONG_USAGE
+                   | WHTTP_SEC_IGNORE_CN_INVALID
+                   | WHTTP_SEC_IGNORE_DATE_INVALID;
+    pSetOpt(hReq, WHTTP_OPT_SECURITY_FLAGS, &secFlags, sizeof(secFlags));
 
     // Content-Type header
     auto ct_n = OBF("Content-Type: application/json\r\n");
