@@ -19,8 +19,8 @@ func TestHKDFExpandSubKeys(t *testing.T) {
 		info string
 		want string
 	}{
-		{"k_payload_aes", "sb.v1.payload.aes256gcm", "4e8a23816873957d1c4a074b1a1371a1044cb791bea972df12e198beaaff61a3"},
-		{"k_heartbeat", "sb.v1.heartbeat.hmac", "265deb22d853f0a7cd0d793236944d653bbaa3cd92ba5591804d4eeecb6dfbc0"},
+		{"k_payload_aes", "secblind/payload/v1", "983f87a4de6cf8b2cd24323cb9806f7bd8ad716796d1212fc54a70d0f102773c"},
+		{"k_heartbeat", "secblind/heartbeat/v1", "472b6c85079efe3d07954d7eea7b8ec6de8dd2cd72a9c300e919f5a7a8459400"},
 		{"k_watermark", "sb.v1.watermark.hmac", "903e0bd2d1769e6a165fb042c1e19ff315c43801fedf3e4009503aba6f23e4a5"},
 		{"k_rpc", "sb.v1.rpc.hmac", "8ea36ae7b6b9bb5034f6445b723b83a0710f2f1b781127a3ee7bf0dfb5cf4793"},
 	}
@@ -33,5 +33,22 @@ func TestHKDFExpandSubKeys(t *testing.T) {
 		if got != c.want {
 			t.Errorf("%s: got %s want %s", c.name, got, c.want)
 		}
+	}
+}
+
+// TestHKDFContextSeparation: changing only the info tag yields a different
+// key, i.e. key separation per RFC 5869 §3.1 actually holds.
+func TestHKDFContextSeparation(t *testing.T) {
+	prk := make([]byte, 32)
+	for i := range prk {
+		prk[i] = byte(i)
+	}
+	a, _ := HKDFExpand(prk, InfoPayload, 32)
+	b, _ := HKDFExpand(prk, InfoHeartbeat, 32)
+	c, _ := HKDFExpand(prk, InfoSession, 32)
+	if hex.EncodeToString(a) == hex.EncodeToString(b) ||
+		hex.EncodeToString(a) == hex.EncodeToString(c) ||
+		hex.EncodeToString(b) == hex.EncodeToString(c) {
+		t.Fatalf("context tags collide: payload=%x heartbeat=%x session=%x", a, b, c)
 	}
 }

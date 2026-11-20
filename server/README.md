@@ -115,5 +115,10 @@ Driven by the shipped client source; see `PLAN.md`:
 
 1. Login HKDF: salt = `hwid_hex_bytes || "SecBlind_HKDF_v1"`, info empty.
    `licenses.session_salt` dropped.
+   Session-key HKDF: info = `"secblind/session/v1" || session_id || hwid_hash`.
+   Per-use sub-key HKDF-Expand info tags: `"secblind/payload/v1"`,
+   `"secblind/heartbeat/v1"`, `"sb.v1.watermark.hmac"`, `"sb.v1.rpc.hmac"`.
+   Constants live in `pkg/crypto/hkdf.go` and must match the C++ loader
+   byte-for-byte (RFC 5869 §3.1 key separation, closes TODO 9).
 2. Session-binding `[0..32]` = hex-decoded HWID (32 raw bytes), not
    `SHA-256(hwid_hex_bytes)`.

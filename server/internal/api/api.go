@@ -25,8 +25,8 @@ import (
 // HKDF-Expand info tags for session_key key-separation (RFC 5869 §3.3).
 // The client derives the same four sub-keys from the same PRK (session_key).
 var (
-	infoPayloadAES = []byte("sb.v1.payload.aes256gcm")
-	infoHeartbeat  = []byte("sb.v1.heartbeat.hmac")
+	infoPayloadAES = crypto.InfoPayload
+	infoHeartbeat  = crypto.InfoHeartbeat
 	infoWatermark  = []byte("sb.v1.watermark.hmac")
 	infoRPC        = []byte("sb.v1.rpc.hmac")
 )
@@ -424,7 +424,12 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "server_error", "hwid decode")
 		return
 	}
-	info := append(append([]byte{}, sessionIDRaw...), hwidHashBytes...)
+	// info = "secblind/session/v1" || session_id || hwid_hash (RFC 5869 §3.1
+	// context tag + per-session unique material).
+	info := make([]byte, 0, len(crypto.InfoSession)+len(sessionIDRaw)+len(hwidHashBytes))
+	info = append(info, crypto.InfoSession...)
+	info = append(info, sessionIDRaw...)
+	info = append(info, hwidHashBytes...)
 	sessionKey, err := crypto.HKDF(s.Cfg.MasterSecret, crypto.HKDFSalt, info, 32)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "server_error", "sess hkdf")

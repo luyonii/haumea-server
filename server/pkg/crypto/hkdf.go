@@ -13,6 +13,15 @@ import (
 // HKDFSalt is the 16-byte ASCII constant both sides use for the fixed-salt case.
 var HKDFSalt = []byte("SecBlind_HKDF_v1")
 
+// Per-context HKDF info tags (RFC 5869 §3.1). ASCII, no null terminator.
+// Both server and C++ loader must use these byte-for-byte or key separation
+// (closes TODO 9).
+var (
+	InfoSession   = []byte("secblind/session/v1")
+	InfoPayload   = []byte("secblind/payload/v1")
+	InfoHeartbeat = []byte("secblind/heartbeat/v1")
+)
+
 // HKDF derives `n` bytes from ikm using HMAC-SHA256.
 func HKDF(ikm, salt, info []byte, n int) ([]byte, error) {
 	r := hkdf.New(sha256.New, ikm, salt, info)

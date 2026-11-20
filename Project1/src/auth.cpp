@@ -231,8 +231,8 @@ auth_result authenticate(const std::string& license_key, const std::string& hwid
     // Info tags must match the Go server byte-for-byte. OBF needs a literal at
     // the call site, so each tag is expanded explicitly.
     bool expand_ok = true;
-    auto i0 = OBF("sb.v1.payload.aes256gcm");
-    auto i1 = OBF("sb.v1.heartbeat.hmac");
+    auto i0 = OBF("secblind/payload/v1");
+    auto i1 = OBF("secblind/heartbeat/v1");
     auto i2 = OBF("sb.v1.watermark.hmac");
     auto i3 = OBF("sb.v1.rpc.hmac");
     const struct { std::vector<uint8_t>* dst; const char* p; size_t n; } ex[] = {
