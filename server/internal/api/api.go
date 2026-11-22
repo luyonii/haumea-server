@@ -52,6 +52,12 @@ type Config struct {
 	// (constant-time compare). Empty + EnableDebug=true fails safe:
 	// route is NOT registered, startup logs a warning.
 	DebugToken string
+
+	// RequireHTTPS, when true, rejects any request that did not arrive from a
+	// trusted proxy asserting X-Forwarded-Proto: https. Default false (the
+	// integration harness speaks plain HTTP). Enable in production behind the
+	// nginx TLS terminator as defense-in-depth.
+	RequireHTTPS bool
 }
 
 // authSink absorbs discarded HMAC results so the compiler cannot elide the
@@ -63,6 +69,9 @@ var authSink atomic.Pointer[[]byte]
 // only by clientIP. Package-level so middleware.go's observe() can call clientIP
 // without threading the Server through.
 var trustedProxyNets []*net.IPNet
+
+// requireHTTPS mirrors Config.RequireHTTPS for middleware access. Set once by New().
+var requireHTTPS bool
 
 type Server struct {
 	PG  *store.PG
@@ -97,6 +106,7 @@ func New(pg *store.PG, rdb *store.Redis, cfg Config) *Server {
 		panic(fmt.Sprintf("api: trusted_proxies: %v", err))
 	}
 	trustedProxyNets = nets
+	requireHTTPS = cfg.RequireHTTPS
 	return &Server{PG: pg, RDB: rdb, Cfg: cfg}
 }
 
@@ -360,9 +370,10 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if errors.Is(err, store.ErrNotFound) {
 		b := expected // prevent elision of HKDF+HMAC above
 		authSink.Store(&b)
-		// timing balance: pay KillStatus cost on unknown_license so attacker
-		// cannot distinguish it from the bad_challenge_response / killed paths.
-		_, _ = s.PG.KillStatus(ctx, 0)
+		// timing balance: pay the SAME KillStatus + isRevoked cost the
+		// license-exists path pays, so unknown_license is not distinguishable
+		// by the extra revoke-check round trip.
+		_, _ = s.enforcementBlocked(ctx, 0)
 		failAuth(nil, "unknown_license")
 		return
 	}
@@ -373,8 +384,8 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// Timing balance: run KillStatus + isRevoked on every license-exists fail
 	// path so banned/killed/revoked/bad_challenge_response look identical to
 	// an external observer (same DB + Redis calls, same response).
-	killed, _ := s.PG.KillStatus(ctx, lic.ID)
-	revoked := s.isRevoked(ctx, lic.ID)
+	// enforcementBlocked fails closed (DB error -> treat as killed/revoked).
+	killed, revoked := s.enforcementBlocked(ctx, lic.ID)
 	if lic.Banned {
 		failAuth(&lic.ID, "banned")
 		return
@@ -544,9 +555,8 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Rotate nonce, renew TTL. Check kill + revocation.
-	killed, _ := s.PG.KillStatus(ctx, sess.LicenseID)
-	revoked := s.isRevoked(ctx, sess.LicenseID)
+	// Rotate nonce, renew TTL. Check kill + revocation (fails closed).
+	killed, revoked := s.enforcementBlocked(ctx, sess.LicenseID)
 	if killed || revoked {
 		// Kill: drop session + latest_token, never renew TTL.
 		s.RDB.DeleteSession(ctx, req.Token)
@@ -627,8 +637,8 @@ func (s *Server) handleFetch(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusForbidden, "not_authorized", "")
 		return
 	}
-	if killed, _ := s.PG.KillStatus(ctx, sess.LicenseID); killed {
-		s.PG.LogAbuse(ctx, &sess.LicenseID, clientIP(r), "fetch_killed")
+	if killed, revoked := s.enforcementBlocked(ctx, sess.LicenseID); killed || revoked {
+		s.PG.LogAbuse(ctx, &sess.LicenseID, clientIP(r), "fetch_killed_or_revoked")
 		writeErr(w, http.StatusForbidden, "not_authorized", "")
 		return
 	}
@@ -675,10 +685,20 @@ func (s *Server) handleFetch(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "server_error", "seal")
 		return
 	}
+	// target_exe_path tells the client which host process to launch and
+	// inject into. Sourced from the license record once that column is
+	// wired; for now the field is always present but may be empty. The
+	// client falls back to argv[1] when empty and refuses to launch if
+	// both are empty.
+	targetExe := ""
+	if lic != nil {
+		targetExe = lic.TargetExePath
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"iv":         base64.StdEncoding.EncodeToString(sealed.IV),
-		"tag":        base64.StdEncoding.EncodeToString(sealed.Tag),
-		"ciphertext": base64.StdEncoding.EncodeToString(sealed.Ciphertext),
+		"iv":              base64.StdEncoding.EncodeToString(sealed.IV),
+		"tag":             base64.StdEncoding.EncodeToString(sealed.Tag),
+		"ciphertext":      base64.StdEncoding.EncodeToString(sealed.Ciphertext),
+		"target_exe_path": targetExe,
 	})
 }
 
@@ -754,6 +774,16 @@ func (s *Server) handleRPC(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusTooManyRequests, map[string]any{
 			"error": "rate_limited", "retry_after": 30,
 		})
+		return
+	}
+
+	// Enforce kill/revoke here too: /heartbeat is the only other place that
+	// checks, and a client is not obligated to send heartbeats. Without this a
+	// killed/revoked license keeps calling /rpc until the session TTL expires.
+	if killed, revoked := s.enforcementBlocked(ctx, sess.LicenseID); killed || revoked {
+		s.RDB.DeleteSession(ctx, req.Token)
+		s.RDB.KillSessionsFor(ctx, sess.LicenseID)
+		writeErr(w, http.StatusUnauthorized, "session_expired", "")
 		return
 	}
 
@@ -855,8 +885,9 @@ func (s *Server) handleRPC(w http.ResponseWriter, r *http.Request) {
 func licenseByID(ctx context.Context, pg *store.PG, id int64) (*store.License, error) {
 	var l store.License
 	err := pg.Pool.QueryRow(ctx,
-		`SELECT id, license_key, banned FROM licenses WHERE id = $1`, id,
-	).Scan(&l.ID, &l.Key, &l.Banned)
+		`SELECT id, license_key, banned, COALESCE(target_exe_path, '')
+		   FROM licenses WHERE id = $1`, id,
+	).Scan(&l.ID, &l.Key, &l.Banned, &l.TargetExePath)
 	if err != nil {
 		return nil, err
 	}

@@ -24,6 +24,11 @@ type License struct {
 	ID     int64
 	Key    string
 	Banned bool
+	// TargetExePath is the host executable the client should launch and inject
+	// into. Empty when no per-license override exists; the client then falls
+	// back to its argv[1]. Column `target_exe_path` is nullable; a NULL row
+	// maps to "".
+	TargetExePath string
 }
 
 type PG struct{ Pool *pgxpool.Pool }

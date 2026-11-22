@@ -65,6 +65,9 @@
     <ClCompile Include="src\rpc.cpp">
       <Filter>src</Filter>
     </ClCompile>
+    <ClCompile Include="src\game_launcher.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="include\obfstr.h">
@@ -125,6 +128,9 @@
       <Filter>include</Filter>
     </ClInclude>
     <ClInclude Include="include\rpc.h">
+      <Filter>include</Filter>
+    </ClInclude>
+    <ClInclude Include="include\game_launcher.h">
       <Filter>include</Filter>
     </ClInclude>
   </ItemGroup>

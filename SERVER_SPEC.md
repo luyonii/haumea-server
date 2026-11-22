@@ -160,9 +160,15 @@ ciphertext is decrypted with the `session_key` returned by `/auth/login`.
 {
     "iv": "<base64 12-byte IV>",
     "tag": "<base64 16-byte GCM auth tag>",
-    "ciphertext": "<base64 of AES-256-GCM encrypted (session_binding || PE)>"
+    "ciphertext": "<base64 of AES-256-GCM encrypted (session_binding || PE)>",
+    "target_exe_path": "<utf-8 path to the host executable, may be empty>"
 }
 ```
+
+`target_exe_path` is sourced from `licenses.target_exe_path` (nullable column
+added by migration `0004_license_target_exe_path.sql`). When the field is
+empty the client falls back to its `argv[1]`; when both are empty the
+client aborts with `launch_failed`. ASCII-only paths are expected.
 
 **Plaintext layout.** The decrypted plaintext is a 128-byte **per-session
 integrity tag** (session binding) followed by the PE body. The client

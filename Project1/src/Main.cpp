@@ -10,6 +10,9 @@
 #include "anti_debug.h"
 #include "anti_tamper.h"
 #include "sentinel.h"
+#ifdef SB_INJECT_DIAG
+#include "injector.h"
+#endif
 
 #include <Windows.h>
 #include <cstdio>
@@ -44,7 +47,10 @@ void scrub_payload_key() {
     for (;;) {}
 }
 
-int main() {
+// wmain is used so the fallback target path from argv is already wide and
+// matches payload::load_and_execute's signature without a narrow->wide
+// conversion at the call site.
+int wmain(int argc, wchar_t* argv[]) {
     // --- Anti-analysis boot ---
     anti_debug::hide_current_thread();
     canary::install();
@@ -81,8 +87,19 @@ int main() {
         for (size_t i = 0; i < sizeof(key_buf); ++i) kb0[i] = 0;
         return 1;
     }
-    while (klen > 0 && (key_buf[klen - 1] == '\n' || key_buf[klen - 1] == '\r'))
+    auto is_ws = [](char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; };
+    while (klen > 0 && is_ws(key_buf[klen - 1]))
         key_buf[--klen] = 0;
+    size_t kstart = 0;
+    if (klen >= 3 && (unsigned char)key_buf[0] == 0xEF &&
+        (unsigned char)key_buf[1] == 0xBB && (unsigned char)key_buf[2] == 0xBF)
+        kstart = 3;
+    while (kstart < klen && is_ws(key_buf[kstart])) ++kstart;
+    if (kstart) {
+        memmove(key_buf, key_buf + kstart, klen - kstart);
+        klen -= kstart;
+        key_buf[klen] = 0;
+    }
 
     std::string license_key(key_buf, klen);
 
@@ -109,7 +126,6 @@ int main() {
     }
 
     // --- Network init ---
-    // TODO: replace with actual server hostname before deployment
     printf("Connecting...\n");
     if (!net::init(OBF("secblind.local"), 443)) {
         printf("Network initialization failed\n");
@@ -168,13 +184,30 @@ int main() {
 
     // --- Payload ---
     printf("Fetching payload...\n");
+    // Target host for the injected module. The server is the primary source
+    // (envelope field `target_exe_path`); argv[1] is the fallback, kept so a
+    // dev can point a test build at an arbitrary executable without changing
+    // the licensing records. If neither supplies a path, load_and_execute
+    // surfaces `launch_failed`.
+    const wchar_t* target_fallback = (argc > 1 && argv && argv[1] && argv[1][0])
+                                         ? argv[1]
+                                         : nullptr;
     auto pr = payload::load_and_execute(
         payload_token.c_str(),
         const_cast<const uint8_t*>(g_payload_aes_key),
         const_cast<const uint8_t*>(g_watermark_key),
         id.c_str(),
         const_cast<const uint8_t*>(g_license_hash),
-        /*is_dll=*/true);
+        target_fallback);
+
+#ifdef SB_INJECT_DIAG
+    fprintf(stderr,
+            "[diag] stub_size=%zu stub_addr=0x%08lx stub_end=0x%08lx last_err=0x%08lx\n",
+            injector::stub_size(),
+            injector::stub_addr(),
+            injector::stub_end_addr(),
+            injector::last_error());
+#endif
 
     // Scrub key + token immediately — payload module no longer needs them.
     scrub_payload_key();
@@ -224,6 +257,7 @@ int main() {
         break;
     }
 
+    system("pause");
     net::shutdown();
     return 0;
 }
