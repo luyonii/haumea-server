@@ -68,6 +68,22 @@
     <ClCompile Include="src\game_launcher.cpp">
       <Filter>src</Filter>
     </ClCompile>
+    <ClCompile Include="src\injector.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="src\stub_worker.c">
+      <Filter>src</Filter>
+    </None>
+  </ItemGroup>
+  <ItemGroup>
+    <MASM Include="src\stub.asm">
+      <Filter>src</Filter>
+    </MASM>
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="payload.rc" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="include\obfstr.h">
@@ -131,6 +147,12 @@
       <Filter>include</Filter>
     </ClInclude>
     <ClInclude Include="include\game_launcher.h">
+      <Filter>include</Filter>
+    </ClInclude>
+    <ClInclude Include="include\injector.h">
+      <Filter>include</Filter>
+    </ClInclude>
+    <ClInclude Include="include\stub_worker.h">
       <Filter>include</Filter>
     </ClInclude>
   </ItemGroup>

@@ -1,0 +1,11 @@
+// Project1/payload.rc — embeds the Phase B worker blob produced by
+// build/extract_blob.ps1 as an RCDATA resource.
+//
+// The resource id matches SB_RESOURCE_WORKER_BLOB in include/stub_worker.h
+// so the loader can FindResource / LoadResource it without exposing a
+// string name in the binary.
+//
+// Path is relative to this .rc file's directory (Project1/); the
+// PreBuildEvent writes build/stub_worker.bin into $(SolutionDir)build.
+
+101 RCDATA "..\\build\\stub_worker.bin"

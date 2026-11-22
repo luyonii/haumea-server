@@ -160,6 +160,14 @@
       <AdditionalIncludeDirectories>$(ProjectDir)include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <LanguageStandard>stdcpp20</LanguageStandard>
     </ClCompile>
+    <PreBuildEvent>
+      <Command>if not exist "$(SolutionDir)build" mkdir "$(SolutionDir)build"
+cl.exe /nologo /c /O1 /Oi /GS- /GR- /EHs-c- /GL- /Fo"$(SolutionDir)build\stub_worker.obj" "$(ProjectDir)src\stub_worker.c"
+if errorlevel 1 exit /b 1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$(SolutionDir)scripts\extract_blob.ps1" -Obj "$(SolutionDir)build\stub_worker.obj" -Out "$(SolutionDir)build\stub_worker.bin"
+if errorlevel 1 exit /b 1</Command>
+      <Message>Building stub_worker blob (Phase B)...</Message>
+    </PreBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="src\Main.cpp" />
@@ -191,6 +199,12 @@
     </MASM>
   </ItemGroup>
   <ItemGroup>
+    <None Include="src\stub_worker.c" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(Platform)'=='Win32'">
+    <ResourceCompile Include="payload.rc" />
+  </ItemGroup>
+  <ItemGroup>
     <ClInclude Include="include\obfstr.h" />
     <ClInclude Include="include\dynapi.h" />
     <ClInclude Include="include\hwid.h" />
@@ -213,6 +227,7 @@
     <ClInclude Include="include\rpc.h" />
     <ClInclude Include="include\game_launcher.h" />
     <ClInclude Include="include\injector.h" />
+    <ClInclude Include="include\stub_worker.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
