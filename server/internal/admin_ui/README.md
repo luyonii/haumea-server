@@ -14,14 +14,17 @@ the `X-Admin-Token` header is the second. Never bind on `0.0.0.0`.
 
 ```
 server/internal/admin_ui/
-├── handler.go       Register(mux, token): mounts /admin/ui/ and
-│                    /admin/ui/api/records. Gated by subtle.ConstantTimeCompare.
+├── handler.go       Register(mux, _): mounts /admin/ui/ (static only;
+│                    the resource endpoints live on the server's own
+│                    admin mux at /api/v1/admin/*).
 ├── static/
-│   ├── index.html   Single page: top bar, sidebar, table,
-│   │                detail side panel, edit modal.
+│   ├── index.html   Single page: top bar, sidebar, table, detail
+│   │                side panel, and modal(s).
 │   ├── app.js       ES module. Exports fetchJSON, renderTable,
-│   │                openModal, closeModal. Boots the first
-│   │                resource on load.
+│   │                openModal, closeModal. Boots the first resource
+│   │                on load. Row objects are kept off the DOM in a
+│   │                WeakMap so untrusted strings never pass through
+│   │                attributes.
 │   └── style.css    Dark theme.
 └── README.md        This file.
 ```
@@ -34,56 +37,79 @@ file under `static/`; rebuild (`go build`) after adding or editing assets.
 Called from `server/cmd/server/main.go` on the admin mux, right after
 `srv.RegisterAdmin(...)`. Both share the loopback bind; the operator reaches
 `http://localhost:8443/admin/ui/` through an SSH local-forward and is
-prompted for the token on first load.
+prompted for the token on first load. Static assets are **ungated** so the JS
+can boot and prompt; the gate lives on the data endpoints (`/api/v1/admin/*`)
+where the data actually is.
 
 ## Adding a resource
 
-Example: a `clients` resource.
+The licenses resource is the canonical example — a read-only endpoint plus a
+create flow and a per-row revoke action.
 
-1. **Go.** In `handler.go`, define the response type and a handler:
+### 1. Server endpoint
 
-   ```go
-   type Client struct {
-       ID   int64  `json:"id"`
-       Name string `json:"name"`
-   }
+The admin JSON endpoints already route through `api.RegisterAdmin`; add a
+new handler there (see `server/internal/api/admin.go`). For licenses:
 
-   func handleClients(w http.ResponseWriter, _ *http.Request) {
-       w.Header().Set("Content-Type", "application/json")
-       _ = json.NewEncoder(w).Encode([]Client{})
-   }
-   ```
+```go
+reg("/api/v1/admin/licenses", s.handleAdminListLicenses)  // GET
+reg("/api/v1/admin/license",  s.handleAdminCreateLicense) // POST
+reg("/api/v1/admin/revoke",   s.handleAdminRevoke)        // POST
+```
 
-   Mount in `Register`:
+Each handler writes JSON through `writeJSON` / `writeErr`. No new mount in
+`admin_ui/handler.go` is needed.
 
-   ```go
-   mux.Handle("GET /admin/ui/api/clients", gate(http.HandlerFunc(handleClients)))
-   ```
+### 2. Sidebar entry
 
-2. **HTML.** In `static/index.html`, append a sidebar entry:
+In `static/index.html`:
 
-   ```html
-   <li class="resource" data-resource="clients">Clients</li>
-   ```
+```html
+<li class="resource" data-resource="licenses">Licenses</li>
+```
 
-3. **JS.** In `static/app.js`, add to the `RESOURCES` map:
+### 3. Resource spec (JS)
 
-   ```javascript
-   clients: {
-       path: '/admin/ui/api/clients',
-       columns: ['id', 'name'],
-   },
-   ```
+In `static/app.js`, add to `RESOURCES`:
 
-4. Rebuild (`go build ./...`). The new sidebar item renders automatically;
-   clicking it fetches the endpoint and renders the table.
+```javascript
+licenses: {
+    path: '/api/v1/admin/licenses',
+    columns: ['id', 'key', 'hwid', 'banned', 'revoked', 'killed', 'created_at'],
+    labels:  ['ID', 'Key', 'HWID', 'Banned', 'Revoked', 'Killed', 'Created'],
+    create: {                                      // optional — shows "+ New"
+        modal:  'new-license-modal',
+        formId: 'new-license-form',
+        request: (form) => ({
+            path: '/api/v1/admin/license',
+            body: { prefix: ..., note: ... },
+        }),
+        onSuccess: (resp) => toast('Created ' + resp.license_key, 'ok'),
+    },
+    row: {                                         // optional — detail-panel button
+        label:   'Revoke',
+        danger:  true,
+        hidden:  (row) => !!row.revoked,
+        confirm: (row) => 'Revoke ' + row.key + '?',
+        request: (row) => ({
+            path: '/api/v1/admin/revoke',
+            body: { license_key: row.key },
+        }),
+        onSuccess: (_, row) => toast('Revoked ' + row.key, 'ok'),
+    },
+},
+```
+
+### 4. Rebuild
+
+`go build ./...` (or `.\dist\deploy-server.ps1` to also push to the VPS).
 
 ## Not included (yet)
 
-- CRUD write operations (`POST`/`PATCH`/`DELETE`). The edit modal exists but
-  the submit handler is a no-op; wire it when the first mutable resource lands.
 - Paging / server-side filtering. `renderTable` does a full-list render; the
   filter input is cosmetic until real resource volume demands it.
+- Column sort.
+- Per-row inline edit (only create + per-row action land today).
 - Tests. Scaffolding only.
 
 ## Deployment posture
