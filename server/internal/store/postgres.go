@@ -193,6 +193,47 @@ func (p *PG) HWIDBindIfAllowed(ctx context.Context, licenseID int64, hwid string
 	return tx.Commit(ctx)
 }
 
+// AutoBanIfSentinelThreshold bans the license iff it has >= threshold
+// sentinel_trip abuse_log rows inside `window` AND is not already banned. It
+// returns banned=true ONLY on the call that flips banned false->true: the
+// UPDATE ... WHERE banned=false ... RETURNING id is the single source of truth
+// for idempotency, so two near-simultaneous callers that both meet the
+// threshold see exactly one true (the row-writer) and one (false, nil) on the
+// loser — no double metric increment. pgx.ErrNoRows means either the threshold
+// was not met or the license was already banned; both return (false, nil).
+//
+// Note: the trip timestamp column is abuse_log.occurred_at (see migration
+// 0001); make_interval(secs => $3) keeps the window parameterized without
+// string interpolation into the SQL.
+func (p *PG) AutoBanIfSentinelThreshold(ctx context.Context, licenseID int64, threshold int, window time.Duration) (bool, error) {
+	var id int64
+	err := p.Pool.QueryRow(ctx,
+		`WITH recent AS (
+		    SELECT 1 FROM abuse_log
+		     WHERE license_id = $1
+		       AND reason LIKE 'sentinel_trip:%'
+		       AND occurred_at > now() - make_interval(secs => $3)
+		     LIMIT $2
+		 ), threshold_met AS (
+		    SELECT 1 FROM recent HAVING count(*) >= $2
+		 )
+		 UPDATE licenses
+		    SET banned = true
+		  WHERE id = $1
+		    AND banned = false
+		    AND EXISTS (SELECT 1 FROM threshold_met)
+		 RETURNING id`,
+		licenseID, threshold, window.Seconds(),
+	).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // LatestPayload returns the most recent PE build for the license, or ErrNotFound.
 func (p *PG) LatestPayload(ctx context.Context, licenseID int64) ([]byte, error) {
 	var pe []byte

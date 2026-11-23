@@ -241,6 +241,18 @@ func isValidHWID(h string) bool {
 	return true
 }
 
+// parseUint32Mask parses a heartbeat telemetry mask. It rejects negatives,
+// floats, non-numeric input, and anything above uint32 max; the returned value
+// is only valid when ok is true. Range-checking here guarantees the HMAC
+// canonical downstream only ever sees a value in [0, 2^32-1].
+func parseUint32Mask(n json.Number) (uint32, bool) {
+	v, err := n.Int64()
+	if err != nil || v < 0 || v > 0xFFFFFFFF {
+		return 0, false
+	}
+	return uint32(v), true
+}
+
 // isValidRPCMethod guards the canonical "method|token|timestamp|payload" HMAC:
 // a method containing '|' could collide with a different valid tuple.
 func isValidRPCMethod(m string) bool {
@@ -485,14 +497,31 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Token     string `json:"session_token"`
-		HMAC      string `json:"hmac"`
-		Timestamp string `json:"timestamp"`
-		NextNonce string `json:"next_nonce"`
+		Token     string      `json:"session_token"`
+		HMAC      string      `json:"hmac"`
+		Timestamp string      `json:"timestamp"`
+		NextNonce string      `json:"next_nonce"`
+		// Sentinel telemetry. Required (json.Number zero value "" => 400): an
+		// old or tampered client that omits them must NOT silently default to
+		// zero and dodge telemetry. Parsed + range-checked before any store
+		// access so the HMAC canonical never sees a mutated value.
+		SentinelMask json.Number `json:"sentinel_mask"`
+		ToolMask     json.Number `json:"tool_mask"`
 	}
 	if err := readJSON(w, r, &req); err != nil ||
-		req.Token == "" || req.HMAC == "" || req.Timestamp == "" || req.NextNonce == "" {
+		req.Token == "" || req.HMAC == "" || req.Timestamp == "" || req.NextNonce == "" ||
+		req.SentinelMask == "" || req.ToolMask == "" {
 		writeErr(w, http.StatusBadRequest, "bad_request", "missing fields")
+		return
+	}
+	sMask, ok := parseUint32Mask(req.SentinelMask)
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "bad_request", "sentinel_mask out of range")
+		return
+	}
+	tMask, ok := parseUint32Mask(req.ToolMask)
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "bad_request", "tool_mask out of range")
 		return
 	}
 	heartbeatTotal.Inc()
@@ -547,12 +576,39 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "server_error", "hkdf")
 		return
 	}
-	expected := crypto.HMAC256(kHeartbeat, []byte(req.Timestamp))
+	// Canonical: ASCII timestamp || "|" || sentinel_mask || "|" || tool_mask,
+	// masks as decimal uint32 (no leading zeros, no sign). Matches heartbeat.cpp.
+	canon := req.Timestamp + "|" + strconv.FormatUint(uint64(sMask), 10) + "|" + strconv.FormatUint(uint64(tMask), 10)
+	expected := crypto.HMAC256(kHeartbeat, []byte(canon))
 	got, err := base64.StdEncoding.DecodeString(req.HMAC)
 	if err != nil || !crypto.Equal(got, expected) {
 		metricInc("hmac_fail_total", "/session/heartbeat")
 		writeErr(w, http.StatusUnauthorized, "invalid_hmac", "")
 		return
+	}
+
+	// Sentinel telemetry: a non-zero mask is a reported trip. Persist it, then
+	// auto-ban if this license crossed the 2-trips/24h threshold. The ban is
+	// the authoritative kill signal, so it takes priority over the normal
+	// kill/revoke path below.
+	if sMask != 0 || tMask != 0 {
+		s.PG.LogAbuse(ctx, &sess.LicenseID, clientIP(r),
+			fmt.Sprintf("sentinel_trip:s=%d,t=%d", sMask, tMask))
+		banned, err := s.PG.AutoBanIfSentinelThreshold(ctx, sess.LicenseID, 2, 24*time.Hour)
+		if err != nil {
+			L().Warnw("autoban_check_failed",
+				"request_id", RequestID(ctx), "license_id", sess.LicenseID, "err", err.Error())
+		}
+		if banned {
+			sentinelAutobanTotal.Inc()
+			s.RDB.DeleteSession(ctx, req.Token)
+			s.RDB.KillSessionsFor(ctx, sess.LicenseID)
+			writeJSON(w, http.StatusOK, map[string]any{
+				"kill":    true,
+				"revoked": true,
+			})
+			return
+		}
 	}
 
 	// Rotate nonce, renew TTL. Check kill + revocation (fails closed).

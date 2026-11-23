@@ -49,6 +49,9 @@ var (
 	heartbeatTotal = prometheus.NewCounter(
 		prometheus.CounterOpts{Name: "heartbeat_total", Help: "Heartbeat requests received."},
 	)
+	sentinelAutobanTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{Name: "sentinel_autoban_total", Help: "licenses auto-banned after N sentinel trips"},
+	)
 	// legacyEvents keeps historical internal counters addressable without
 	// renaming every callsite (hmac_fail, rpc_replay_blocked, etc.).
 	legacyEvents = prometheus.NewCounterVec(
@@ -73,6 +76,7 @@ func init() {
 		licenseCreatedTotal,
 		rpcCallsTotal,
 		heartbeatTotal,
+		sentinelAutobanTotal,
 		legacyEvents,
 		redisUp,
 		pgUp,
