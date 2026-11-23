@@ -32,10 +32,7 @@
     <ClCompile Include="src\crypto.cpp">
       <Filter>src</Filter>
     </ClCompile>
-    <ClCompile Include="src\pe_loader.cpp">
-      <Filter>src</Filter>
-    </ClCompile>
-    <ClCompile Include="src\payload.cpp">
+<ClCompile Include="src\payload.cpp">
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="src\anti_debug.cpp">
@@ -68,9 +65,6 @@
     <ClCompile Include="src\game_launcher.cpp">
       <Filter>src</Filter>
     </ClCompile>
-    <ClCompile Include="src\injector.cpp">
-      <Filter>src</Filter>
-    </ClCompile>
     <ClCompile Include="src\payload_worker.cpp">
       <Filter>src</Filter>
     </ClCompile>
@@ -79,11 +73,6 @@
     <None Include="src\stub_worker.c">
       <Filter>src</Filter>
     </None>
-  </ItemGroup>
-  <ItemGroup>
-    <MASM Include="src\stub.asm">
-      <Filter>src</Filter>
-    </MASM>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="include\obfstr.h">
@@ -113,10 +102,7 @@
     <ClInclude Include="include\crypto.h">
       <Filter>include</Filter>
     </ClInclude>
-    <ClInclude Include="include\pe_loader.h">
-      <Filter>include</Filter>
-    </ClInclude>
-    <ClInclude Include="include\payload.h">
+<ClInclude Include="include\payload.h">
       <Filter>include</Filter>
     </ClInclude>
     <ClInclude Include="include\anti_debug.h">
@@ -147,9 +133,6 @@
       <Filter>include</Filter>
     </ClInclude>
     <ClInclude Include="include\game_launcher.h">
-      <Filter>include</Filter>
-    </ClInclude>
-    <ClInclude Include="include\injector.h">
       <Filter>include</Filter>
     </ClInclude>
     <ClInclude Include="include\payload_worker.h">

@@ -54,7 +54,6 @@
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <ImportGroup Label="ExtensionSettings">
-    <Import Project="$(VCTargetsPath)\BuildCustomizations\masm.props" />
   </ImportGroup>
   <ImportGroup Label="Shared">
   </ImportGroup>
@@ -169,9 +168,6 @@
     <ClCompile Include="src\auth.cpp" />
     <ClCompile Include="src\heartbeat.cpp" />
     <ClCompile Include="src\crypto.cpp" />
-    <ClCompile Include="src\pe_loader.cpp">
-      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
-    </ClCompile>
     <ClCompile Include="src\payload.cpp" />
     <ClCompile Include="src\anti_debug.cpp" />
     <ClCompile Include="src\anti_vm.cpp" />
@@ -183,13 +179,7 @@
     <ClCompile Include="src\canary.cpp" />
     <ClCompile Include="src\rpc.cpp" />
     <ClCompile Include="src\game_launcher.cpp" />
-    <ClCompile Include="src\injector.cpp" />
     <ClCompile Include="src\payload_worker.cpp" />
-  </ItemGroup>
-  <ItemGroup>
-    <MASM Include="src\stub.asm">
-      <ExcludedFromBuild Condition="'$(Platform)'=='x64'">true</ExcludedFromBuild>
-    </MASM>
   </ItemGroup>
   <ItemGroup>
     <None Include="src\stub_worker.c" />
@@ -204,7 +194,6 @@
     <ClInclude Include="include\auth.h" />
     <ClInclude Include="include\heartbeat.h" />
     <ClInclude Include="include\crypto.h" />
-    <ClInclude Include="include\pe_loader.h" />
     <ClInclude Include="include\payload.h" />
     <ClInclude Include="include\anti_debug.h" />
     <ClInclude Include="include\anti_vm.h" />
@@ -216,7 +205,6 @@
     <ClInclude Include="include\canary.h" />
     <ClInclude Include="include\rpc.h" />
     <ClInclude Include="include\game_launcher.h" />
-    <ClInclude Include="include\injector.h" />
     <ClInclude Include="include\payload_worker.h" />
     <ClInclude Include="include\stub_worker.h" />
   </ItemGroup>
@@ -227,7 +215,6 @@
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
-    <Import Project="$(VCTargetsPath)\BuildCustomizations\masm.targets" />
   </ImportGroup>
   <!-- Phase B blob pipeline. Lives as its own Target so MSBuild honors
        Inputs/Outputs up-to-date checks AND the per-platform Condition. The

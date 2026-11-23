@@ -10,10 +10,6 @@
 #include "anti_debug.h"
 #include "anti_tamper.h"
 #include "sentinel.h"
-#ifdef SB_INJECT_DIAG
-#include "injector.h"
-#endif
-
 #include <Windows.h>
 #include <cstdio>
 #include <cstring>
@@ -199,15 +195,6 @@ int wmain(int argc, wchar_t* argv[]) {
         id.c_str(),
         const_cast<const uint8_t*>(g_license_hash),
         target_fallback);
-
-#ifdef SB_INJECT_DIAG
-    fprintf(stderr,
-            "[diag] stub_size=%zu stub_addr=0x%08lx stub_end=0x%08lx last_err=0x%08lx\n",
-            injector::stub_size(),
-            injector::stub_addr(),
-            injector::stub_end_addr(),
-            injector::last_error());
-#endif
 
     // Scrub key + token immediately — payload module no longer needs them.
     scrub_payload_key();
