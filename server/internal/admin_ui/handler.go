@@ -28,11 +28,16 @@ type Record struct {
 
 // Register mounts two routes on mux:
 //
-//	GET  /admin/ui/            — embedded static assets
-//	GET  /admin/ui/api/records — placeholder JSON list
+//	GET  /admin/ui/            — embedded static assets (ungated; the JS
+//	                             boots then prompts for the token and sends
+//	                             it on every /api/* call)
+//	GET  /admin/ui/api/records — placeholder JSON list, gated
 //
-// Both are gated by an X-Admin-Token header compared constant-time against
-// token. An empty token argument refuses every request (fail-safe).
+// The gate compares X-Admin-Token constant-time against token. An empty
+// token argument refuses every /api/* request (fail-safe). The static files
+// leak nothing by themselves: no project data, no endpoints beyond what the
+// server's Register call already declares. Defense in depth is the loopback
+// bind + SSH-forward requirement, not another gate on the HTML.
 func Register(mux *http.ServeMux, token string) {
 	sub, err := fs.Sub(staticFS, "static")
 	if err != nil {
@@ -53,7 +58,7 @@ func Register(mux *http.ServeMux, token string) {
 		})
 	}
 
-	mux.Handle("GET /admin/ui/", gate(http.StripPrefix("/admin/ui/", files)))
+	mux.Handle("GET /admin/ui/", http.StripPrefix("/admin/ui/", files))
 	mux.Handle("GET /admin/ui/api/records", gate(http.HandlerFunc(handleRecords)))
 }
 
