@@ -27,23 +27,46 @@ struct SYSTEM_KERNEL_DEBUGGER_INFO {
     BOOLEAN DebuggerNotPresent;
 };
 
+// Arch-specific PEB offsets:
+//   x64: PEB+0xBC NtGlobalFlag, PEB+0x30 ProcessHeap, Heap flags @ +0x70/+0x74
+//   x86: PEB+0x68 NtGlobalFlag, PEB+0x18 ProcessHeap, Heap flags @ +0x40/+0x44
+#ifdef _M_X64
+static constexpr uintptr_t PEB_NGF_OFF        = 0xBC;
+static constexpr uintptr_t PEB_HEAP_OFF       = 0x30;
+static constexpr uintptr_t HEAP_FLAGS_OFF     = 0x70;
+static constexpr uintptr_t HEAP_FORCE_OFF     = 0x74;
+#else
+static constexpr uintptr_t PEB_NGF_OFF        = 0x68;
+static constexpr uintptr_t PEB_HEAP_OFF       = 0x18;
+static constexpr uintptr_t HEAP_FLAGS_OFF     = 0x40;
+static constexpr uintptr_t HEAP_FORCE_OFF     = 0x44;
+#endif
+
+static inline uint8_t* read_peb_ad() {
+#ifdef _M_X64
+    return reinterpret_cast<uint8_t*>(__readgsqword(0x60));
+#else
+    return reinterpret_cast<uint8_t*>(static_cast<uintptr_t>(__readfsdword(0x30)));
+#endif
+}
+
 static uint32_t check_peb(uint32_t& out) {
-    auto peb = reinterpret_cast<uint8_t*>(__readgsqword(0x60));
+    auto peb = read_peb_ad();
     if (!peb) return 0;
 
     if (peb[0x02])
         out |= static_cast<uint32_t>(detection::peb_being_debugged);
 
-    // NtGlobalFlag at PEB+0xBC (DWORD). Debug heap flags: 0x70.
-    auto ngf = *reinterpret_cast<uint32_t*>(peb + 0xBC);
+    // NtGlobalFlag (DWORD). Debug heap flags: 0x70.
+    auto ngf = *reinterpret_cast<uint32_t*>(peb + PEB_NGF_OFF);
     if (ngf & 0x70)
         out |= static_cast<uint32_t>(detection::peb_nt_global_flag);
 
     // Process heap flags anomaly.
-    auto heap = *reinterpret_cast<uint8_t**>(peb + 0x30);
+    auto heap = *reinterpret_cast<uint8_t**>(peb + PEB_HEAP_OFF);
     if (heap) {
-        auto flags      = *reinterpret_cast<uint32_t*>(heap + 0x70);
-        auto forceFlags = *reinterpret_cast<uint32_t*>(heap + 0x74);
+        auto flags      = *reinterpret_cast<uint32_t*>(heap + HEAP_FLAGS_OFF);
+        auto forceFlags = *reinterpret_cast<uint32_t*>(heap + HEAP_FORCE_OFF);
         // HEAP_GROWABLE == 2. Debug heaps typically add HEAP_TAIL_CHECKING_ENABLED (0x20)
         // or HEAP_FREE_CHECKING_ENABLED (0x40); ForceFlags should be 0 on a normal heap.
         if ((flags & ~0x2u) != 0 || forceFlags != 0)

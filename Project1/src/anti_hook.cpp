@@ -58,7 +58,7 @@ static bool in_module(void* p, void* base) {
     auto mod = static_cast<uint8_t*>(base);
     auto dos = reinterpret_cast<IMAGE_DOS_HEADER*>(mod);
     if (dos->e_magic != IMAGE_DOS_SIGNATURE) return false;
-    auto nt = reinterpret_cast<IMAGE_NT_HEADERS64*>(mod + dos->e_lfanew);
+    auto nt = reinterpret_cast<IMAGE_NT_HEADERS*>(mod + dos->e_lfanew);
     if (nt->Signature != IMAGE_NT_SIGNATURE) return false;
     auto size = nt->OptionalHeader.SizeOfImage;
     auto addr = static_cast<uint8_t*>(p);
@@ -91,8 +91,15 @@ static bool is_hooked(void* api, void* const* trusted, size_t n_trusted) {
         return !in_any_trusted(tgt, trusted, n_trusted);
     }
     if (b[0] == 0xFF && b[1] == 0x25) {
+#if defined(_M_X64)
+        // FF 25 rel32 -> RIP-relative on x64
         auto rel = *reinterpret_cast<int32_t*>(b + 2);
         auto slot = reinterpret_cast<void**>(b + 6 + rel);
+#else
+        // FF 25 abs32 -> absolute address on x86
+        auto addr = *reinterpret_cast<uintptr_t*>(b + 2);
+        auto slot = reinterpret_cast<void**>(addr);
+#endif
         void* tgt = *slot;
         return !in_any_trusted(tgt, trusted, n_trusted);
     }

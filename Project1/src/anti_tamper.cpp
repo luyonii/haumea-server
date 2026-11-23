@@ -23,7 +23,7 @@ uint32_t text_section_crc32() {
     auto dos = reinterpret_cast<IMAGE_DOS_HEADER*>(mod);
     if (dos->e_magic != IMAGE_DOS_SIGNATURE) return SENTINEL_NOT_FOUND;
 
-    auto nt = reinterpret_cast<IMAGE_NT_HEADERS64*>(mod + dos->e_lfanew);
+    auto nt = reinterpret_cast<IMAGE_NT_HEADERS*>(mod + dos->e_lfanew);
     if (nt->Signature != IMAGE_NT_SIGNATURE) return SENTINEL_NOT_FOUND;
 
     // Guard NumberOfSections and section-table bounds. Two tampered bytes in
@@ -31,7 +31,7 @@ uint32_t text_section_crc32() {
     const WORD num_sections = nt->FileHeader.NumberOfSections;
     if (num_sections == 0 || num_sections > 96) return SENTINEL_NOT_FOUND;
     const DWORD sec_tbl_off = dos->e_lfanew
-        + static_cast<DWORD>(FIELD_OFFSET(IMAGE_NT_HEADERS64, OptionalHeader))
+        + static_cast<DWORD>(FIELD_OFFSET(IMAGE_NT_HEADERS, OptionalHeader))
         + nt->FileHeader.SizeOfOptionalHeader;
     const DWORD sec_tbl_end = sec_tbl_off + num_sections * sizeof(IMAGE_SECTION_HEADER);
     if (sec_tbl_end < sec_tbl_off) return SENTINEL_NOT_FOUND; // overflow
