@@ -3,6 +3,7 @@
 // tables to bind Windows API addresses at runtime. Resolved symbols do not
 // appear in the executable's import table (lazy-symbol-binder build policy).
 
+#include <cstddef>
 #include <cstdint>
 
 namespace dynapi {
@@ -15,6 +16,24 @@ constexpr uint32_t hash_api(const char* str) {
         h *= 16777619u;
     }
     return h;
+}
+
+// C++20 NTTP wrapper: carries a string literal as a template argument so the
+// `api_hash_v<"Name">()` instantiation lives entirely at compile time. MSVC
+// otherwise emits the literal to `.rdata` whenever API_HASH expands inside a
+// non-constexpr context (argument to a runtime call), defeating the whole
+// point of hashing the name.
+template <std::size_t N>
+struct api_name_lit {
+    char data[N];
+    constexpr api_name_lit(const char (&s)[N]) {
+        for (std::size_t i = 0; i < N; ++i) data[i] = s[i];
+    }
+};
+
+template <api_name_lit L>
+consteval uint32_t api_hash_v() {
+    return hash_api(L.data);
 }
 
 // FNV-1a hash for module names. Simulates case-insensitive wide-char hashing
@@ -34,7 +53,7 @@ constexpr uint32_t hash_module(const char* str) {
     return h;
 }
 
-#define API_HASH(name)  (::dynapi::hash_api(name))
+#define API_HASH(name)  (::dynapi::api_hash_v<name>())
 #define MOD_HASH(name)  (::dynapi::hash_module(name))
 
 namespace modules {

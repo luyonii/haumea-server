@@ -39,38 +39,70 @@ static uint32_t hash_wide_lower(const wchar_t* str, size_t char_count) {
 }
 
 // ---------------------------------------------------------------------------
-// PEB walk — x64 only
+// PEB walk — x64 / x86
 // ---------------------------------------------------------------------------
 //
-// TEB+0x60  -> PEB
-// PEB+0x18  -> PEB_LDR_DATA
-// Ldr+0x20  -> InMemoryOrderModuleList (LIST_ENTRY head)
+// x64:
+//   gs:[0x60]  -> PEB
+//   PEB+0x18   -> PEB_LDR_DATA
+//   Ldr+0x20   -> InMemoryOrderModuleList (LIST_ENTRY head)
+//   link+0x20  DllBase
+//   link+0x48  BaseDllName.Length (WORD, bytes)
+//   link+0x50  BaseDllName.Buffer (wchar_t*)
 //
-// Each link points into LDR_DATA_TABLE_ENTRY at offset 0x10 (InMemoryOrderLinks).
-// Relative to that link:
-//   +0x20  DllBase
-//   +0x48  BaseDllName.Length   (uint16, bytes)
-//   +0x50  BaseDllName.Buffer   (wchar_t*)
+// x86:
+//   fs:[0x30]  -> PEB
+//   PEB+0x0C   -> PEB_LDR_DATA
+//   Ldr+0x14   -> InMemoryOrderModuleList
+//   link+0x10  DllBase
+//   link+0x24  BaseDllName.Length
+//   link+0x28  BaseDllName.Buffer
+//
+// Each link points to LDR_DATA_TABLE_ENTRY's InMemoryOrderLinks, which on x64
+// sits at offset 0x10 of the record and on x86 at offset 0x08. All offsets
+// below are measured from the LIST_ENTRY address itself (what Flink points at).
+
+#ifdef _M_X64
+static constexpr uintptr_t PEB_LDR_OFF        = 0x18;
+static constexpr uintptr_t LDR_INMEM_OFF      = 0x20;
+static constexpr uintptr_t LINK_DLLBASE_OFF   = 0x20;
+static constexpr uintptr_t LINK_NAME_LEN_OFF  = 0x48;
+static constexpr uintptr_t LINK_NAME_BUF_OFF  = 0x50;
+#else
+static constexpr uintptr_t PEB_LDR_OFF        = 0x0C;
+static constexpr uintptr_t LDR_INMEM_OFF      = 0x14;
+static constexpr uintptr_t LINK_DLLBASE_OFF   = 0x10;
+static constexpr uintptr_t LINK_NAME_LEN_OFF  = 0x24;
+static constexpr uintptr_t LINK_NAME_BUF_OFF  = 0x28;
+#endif
+
+static inline uint8_t* read_peb() {
+#ifdef _M_X64
+    return reinterpret_cast<uint8_t*>(__readgsqword(0x60));
+#else
+    return reinterpret_cast<uint8_t*>(static_cast<uintptr_t>(__readfsdword(0x30)));
+#endif
+}
 
 static void* find_module_peb(uint32_t target_hash) {
-    auto peb = reinterpret_cast<uint8_t*>(__readgsqword(0x60));
+    auto peb = read_peb();
     if (!peb) return nullptr;
 
-    auto ldr = *reinterpret_cast<uint8_t**>(peb + 0x18);
+    auto ldr = *reinterpret_cast<uint8_t**>(peb + PEB_LDR_OFF);
     if (!ldr) return nullptr;
 
-    auto head = reinterpret_cast<LIST_ENTRY*>(ldr + 0x20);
+    auto head = reinterpret_cast<LIST_ENTRY*>(ldr + LDR_INMEM_OFF);
 
     size_t steps = 0;
     for (auto curr = head->Flink; curr != head; curr = curr->Flink) {
         if (++steps > 256) return nullptr;  // defensive: corrupted/looped Ldr list
         auto base_ptr = reinterpret_cast<uint8_t*>(curr);
-        auto name_len = *reinterpret_cast<uint16_t*>(base_ptr + 0x48);
-        auto name_buf = *reinterpret_cast<wchar_t**>(base_ptr + 0x50);
+        auto name_len = *reinterpret_cast<uint16_t*>(base_ptr + LINK_NAME_LEN_OFF);
+        auto name_buf = *reinterpret_cast<wchar_t**>(base_ptr + LINK_NAME_BUF_OFF);
 
         if (name_buf && name_len > 0) {
             if (hash_wide_lower(name_buf, name_len / sizeof(wchar_t)) == target_hash)
-                return *reinterpret_cast<void**>(base_ptr + 0x20);
+                return *reinterpret_cast<void**>(base_ptr + LINK_DLLBASE_OFF);
         }
     }
     return nullptr;
@@ -89,7 +121,7 @@ static void* walk_exports(void* base, uint32_t func_hash, int depth = 0) {
     auto dos = reinterpret_cast<IMAGE_DOS_HEADER*>(mod);
     if (dos->e_magic != IMAGE_DOS_SIGNATURE) return nullptr;
 
-    auto nt = reinterpret_cast<IMAGE_NT_HEADERS64*>(mod + dos->e_lfanew);
+    auto nt = reinterpret_cast<IMAGE_NT_HEADERS*>(mod + dos->e_lfanew);
     if (nt->Signature != IMAGE_NT_SIGNATURE) return nullptr;
 
     auto& dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
@@ -172,7 +204,7 @@ static bool ensure_bootstrap() {
     if (!s_kernel32) return false;
 
     s_load_library = reinterpret_cast<fn_LoadLibraryA>(
-        walk_exports(s_kernel32, hash_api("LoadLibraryA")));
+        walk_exports(s_kernel32, API_HASH("LoadLibraryA")));
     return s_load_library != nullptr;
 }
 
