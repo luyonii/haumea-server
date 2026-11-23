@@ -238,7 +238,7 @@
           Outputs="$(ProjectDir)build\stub_worker.bin">
     <MakeDir Directories="$(ProjectDir)build" />
     <Message Text="Building stub_worker blob (Phase B)..." Importance="high" />
-    <Exec Command="cl.exe /nologo /c /O1 /Oi /GS- /GR- /EHs-c- /GL- /Fo&quot;$(ProjectDir)build\stub_worker.obj&quot; &quot;$(ProjectDir)src\stub_worker.c&quot;" />
+    <Exec Command="cl.exe /nologo /c /O1 /Oi /GS- /GR- /Gy- /EHs-c- /GL- /Fo&quot;$(ProjectDir)build\stub_worker.obj&quot; &quot;$(ProjectDir)src\stub_worker.c&quot;" />
     <Exec Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(ProjectDir)..\scripts\extract_blob.ps1&quot; -Obj &quot;$(ProjectDir)build\stub_worker.obj&quot; -Out &quot;$(ProjectDir)build\stub_worker.bin&quot;" />
   </Target>
 </Project>
