@@ -550,6 +550,19 @@ uint32_t __stdcall worker_entry(struct sb_worker_args* args) {
         !args->p_get_current_proc || !args->p_get_system_time) return SB_RC_MISSING_PFN;
     if (args->pt_cap < args->ct_len)                        return SB_RC_PT_CAP_TOO_SMALL;
 
+    // ---------- Force bcrypt.dll into the target process ----------
+    // Under same-boot ASLR the resulting base matches the loader's,
+    // so the pre-resolved BCrypt* pointers in args are valid for the
+    // target. If the target already has bcrypt loaded this is a cheap
+    // refcount bump.
+    {
+        pfn_load_library_a lla = (pfn_load_library_a)args->p_load_library_a;
+        if (!lla(args->s_bcrypt_dll)) {
+            args->result_code = SB_RC_BCRYPT_LOAD_FAIL;
+            return SB_RC_BCRYPT_LOAD_FAIL;
+        }
+    }
+
     // ---------- AES-GCM decrypt ----------
     pfn_open_alg    open_alg    = (pfn_open_alg)   args->p_open_alg;
     pfn_set_prop    set_prop    = (pfn_set_prop)   args->p_set_prop;

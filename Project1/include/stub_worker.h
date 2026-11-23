@@ -51,6 +51,7 @@ extern "C" {
 #define SB_RC_PE_IMPORT_FAIL        0xDEAD0036u
 #define SB_RC_PE_PROTECT_FAIL       0xDEAD0037u
 #define SB_RC_DLLMAIN_FAIL          0xDEAD0038u
+#define SB_RC_BCRYPT_LOAD_FAIL      0xDEAD0039u
 
 #pragma pack(push, 8)
 struct sb_worker_args {
@@ -100,6 +101,13 @@ struct sb_worker_args {
     uint16_t s_sha256[8];                  // L"SHA256"
     uint16_t s_chaining_mode[24];          // L"ChainingMode"
     uint16_t s_chaining_mode_gcm[24];      // L"ChainingModeGCM"
+
+    // ---- ANSI "bcrypt.dll" so the worker can force bcrypt into the
+    //      target process before calling the pre-resolved BCrypt pfns.
+    //      Under same-boot ASLR the module base in the target matches
+    //      the loader's, so the pre-resolved function pointers remain
+    //      valid once LoadLibraryA returns.
+    char     s_bcrypt_dll[16];             // "bcrypt.dll"
 
     // ---- PE map outputs (B.2) -------------------------------------
     uint32_t mapped_base;         // out: VirtualAlloc base of the mapped DLL

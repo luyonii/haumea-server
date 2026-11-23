@@ -71,6 +71,9 @@
     <ClCompile Include="src\injector.cpp">
       <Filter>src</Filter>
     </ClCompile>
+    <ClCompile Include="src\payload_worker.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <None Include="src\stub_worker.c">
@@ -147,6 +150,9 @@
       <Filter>include</Filter>
     </ClInclude>
     <ClInclude Include="include\injector.h">
+      <Filter>include</Filter>
+    </ClInclude>
+    <ClInclude Include="include\payload_worker.h">
       <Filter>include</Filter>
     </ClInclude>
     <ClInclude Include="include\stub_worker.h">
