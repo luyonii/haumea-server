@@ -83,9 +83,6 @@
     </MASM>
   </ItemGroup>
   <ItemGroup>
-    <ResourceCompile Include="payload.rc" />
-  </ItemGroup>
-  <ItemGroup>
     <ClInclude Include="include\obfstr.h">
       <Filter>include</Filter>
     </ClInclude>
@@ -155,5 +152,8 @@
     <ClInclude Include="include\stub_worker.h">
       <Filter>include</Filter>
     </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="payload.rc" />
   </ItemGroup>
 </Project>

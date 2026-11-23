@@ -160,14 +160,6 @@
       <AdditionalIncludeDirectories>$(ProjectDir)include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <LanguageStandard>stdcpp20</LanguageStandard>
     </ClCompile>
-    <PreBuildEvent>
-      <Command>if not exist "$(SolutionDir)build" mkdir "$(SolutionDir)build"
-cl.exe /nologo /c /O1 /Oi /GS- /GR- /EHs-c- /GL- /Fo"$(SolutionDir)build\stub_worker.obj" "$(ProjectDir)src\stub_worker.c"
-if errorlevel 1 exit /b 1
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$(SolutionDir)scripts\extract_blob.ps1" -Obj "$(SolutionDir)build\stub_worker.obj" -Out "$(SolutionDir)build\stub_worker.bin"
-if errorlevel 1 exit /b 1</Command>
-      <Message>Building stub_worker blob (Phase B)...</Message>
-    </PreBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="src\Main.cpp" />
@@ -201,9 +193,6 @@ if errorlevel 1 exit /b 1</Command>
   <ItemGroup>
     <None Include="src\stub_worker.c" />
   </ItemGroup>
-  <ItemGroup Condition="'$(Platform)'=='Win32'">
-    <ResourceCompile Include="payload.rc" />
-  </ItemGroup>
   <ItemGroup>
     <ClInclude Include="include\obfstr.h" />
     <ClInclude Include="include\dynapi.h" />
@@ -229,8 +218,27 @@ if errorlevel 1 exit /b 1</Command>
     <ClInclude Include="include\injector.h" />
     <ClInclude Include="include\stub_worker.h" />
   </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="payload.rc">
+      <ExcludedFromBuild Condition="'$(Platform)'=='x64'">true</ExcludedFromBuild>
+    </ResourceCompile>
+  </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
     <Import Project="$(VCTargetsPath)\BuildCustomizations\masm.targets" />
   </ImportGroup>
+  <!-- Phase B blob pipeline. Lives as its own Target so MSBuild honors
+       Inputs/Outputs up-to-date checks AND the per-platform Condition. The
+       .bin is written next to the .rc (relative to the project dir) so rc.exe
+       resolves "build\stub_worker.bin" without absolute paths. -->
+  <Target Name="BuildStubWorkerBlob"
+          BeforeTargets="ResourceCompile;ClCompile"
+          Condition="'$(Platform)'=='Win32'"
+          Inputs="$(ProjectDir)src\stub_worker.c;$(ProjectDir)include\stub_worker.h;$(ProjectDir)..\scripts\extract_blob.ps1"
+          Outputs="$(ProjectDir)build\stub_worker.bin">
+    <MakeDir Directories="$(ProjectDir)build" />
+    <Message Text="Building stub_worker blob (Phase B)..." Importance="high" />
+    <Exec Command="cl.exe /nologo /c /O1 /Oi /GS- /GR- /EHs-c- /GL- /Fo&quot;$(ProjectDir)build\stub_worker.obj&quot; &quot;$(ProjectDir)src\stub_worker.c&quot;" />
+    <Exec Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(ProjectDir)..\scripts\extract_blob.ps1&quot; -Obj &quot;$(ProjectDir)build\stub_worker.obj&quot; -Out &quot;$(ProjectDir)build\stub_worker.bin&quot;" />
+  </Target>
 </Project>

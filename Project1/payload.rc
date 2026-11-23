@@ -8,4 +8,4 @@
 // Path is relative to this .rc file's directory (Project1/); the
 // PreBuildEvent writes build/stub_worker.bin into $(SolutionDir)build.
 
-101 RCDATA "..\\build\\stub_worker.bin"
+101 RCDATA "build\\stub_worker.bin"
