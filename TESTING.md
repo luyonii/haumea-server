@@ -210,6 +210,38 @@ Spec says not to edit `Project1.sln` automatically. To add it in Visual Studio:
 
 ---
 
+## Server-primary auto-ban E2E — 2026-11-23
+
+Status: **not yet executed**. Requires coordinated deploy of client + server
+(canonical do HMAC mudou em lockstep). Target: staging VPS `65.108.60.114`.
+
+Steps:
+
+1. Deploy server commits `23cb81b` + `a88e42d` to the VPS via
+   `dist/deploy-server.ps1`.
+2. Rebuild the client from `main` (includes commits `22e7d5b` + the Task 4
+   wire commit).
+3. On a Windows VM pointed at the staging server, run the rebuilt client
+   under a debugger attached early enough to be visible to
+   `anti_debug::check_all()`. Expect the client to silently terminate within
+   one monitor tick (≤ 30 s).
+4. On the server (SSH `admin-secblind@65.108.60.114`), confirm:
+   - `psql -c "SELECT id, reason, occurred_at FROM abuse_log WHERE license_id=<X> AND reason LIKE 'sentinel_trip:%' ORDER BY id DESC LIMIT 2"`
+     shows one row after the first run.
+   - Prometheus `sentinel_autoban_total` metric is unchanged (threshold not met).
+5. Repeat the client run. On the server confirm:
+   - `abuse_log` shows a second `sentinel_trip:%` row for the same license.
+   - `sentinel_autoban_total` increased by exactly `1`.
+   - `psql -c "SELECT banned FROM licenses WHERE id=<X>"` → `t`.
+6. Attempt a fresh `/auth/login` with the same license from a clean HWID.
+   Expect `invalid_credentials` (internal reason `banned` in `abuse_log`).
+
+Rollback: `UPDATE licenses SET banned=false WHERE id=<X>` from the admin UI.
+Count row in `abuse_log` is intentionally **not** cleared — the next trip
+inside the 24h window will re-ban.
+
+---
+
 ## Fail criteria summary (one place)
 
 - `scripts\verify_zero_iat.ps1` returns != 0.

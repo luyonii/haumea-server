@@ -30,6 +30,22 @@ static scrub_cb s_scrub_cb = nullptr;
 
 void set_scrub_callback(scrub_cb cb) { s_scrub_cb = cb; }
 
+namespace detail {
+uint32_t compose_sentinel_mask(uint32_t anti_debug_bits,
+                               uint32_t anti_hook_bits,
+                               bool tamper_fail,
+                               bool canary_data_fail,
+                               bool canary_code_fail,
+                               bool seh_fault) noexcept {
+    uint32_t m = anti_debug_bits | anti_hook_bits;
+    if (tamper_fail)      m |= bits::TAMPER;
+    if (canary_data_fail) m |= bits::CANARY_DATA;
+    if (canary_code_fail) m |= bits::CANARY_CODE;
+    if (seh_fault)        m |= bits::SEH_FAULT;
+    return m;
+}
+} // namespace detail
+
 static void terminate_silent() {
     using fn_TP = BOOL (WINAPI*)(HANDLE, UINT);
     using fn_EP = VOID (WINAPI*)(UINT);
@@ -54,7 +70,15 @@ action scan(report& out) {
     return action::continue_;
 }
 
-static void trip_and_die() {
+static void trip_and_die(uint32_t sMask, uint32_t tMask) {
+    // Server-primary enforcement: push the trip bits to the licensing server
+    // BEFORE the local kill, so a persistent trip bans the license even if a
+    // later client build patches out this local terminate. Fire-and-forget,
+    // hard 2s deadline — local kill runs regardless of the HTTP result.
+    if (sMask || tMask) {
+        heartbeat::report_trip(sMask, tMask);
+        heartbeat::flush_once(2000);
+    }
     if (s_scrub_cb) s_scrub_cb();
     heartbeat::stop();
     terminate_silent();
@@ -72,23 +96,31 @@ static DWORD WINAPI monitor_proc(LPVOID) {
             DWORD w = pWait(s_stop_event, 30000);
             if (w != WAIT_TIMEOUT) break;
 
-            bool trip = false;
-            if (anti_debug::check_all())              trip = true;
-            else if (anti_hook::check_critical_apis()) trip = true;
-            else if (!anti_tamper::verify(s_baseline)) trip = true;
-            else if (!canary::verify_data())           trip = true;
-            else if (!canary::verify_code(s_code_baseline)) trip = true;
-            else if (tool_detect::enumerate())         trip = true;
+            // No short-circuit: every check runs so the server receives the
+            // full trip fingerprint, not just the first bit that fired.
+            uint32_t ad_bits = anti_debug::check_all();
+            uint32_t ah_bits = anti_hook::check_critical_apis();
+            bool tamper_fail = !anti_tamper::verify(s_baseline);
+            bool cdata_fail  = !canary::verify_data();
+            bool ccode_fail  = !canary::verify_code(s_code_baseline);
+            uint32_t tm      = tool_detect::enumerate();
 
-            if (trip) {
-                trip_and_die();
+            uint32_t sMask = detail::compose_sentinel_mask(
+                ad_bits, ah_bits, tamper_fail, cdata_fail, ccode_fail,
+                /*seh_fault=*/false);
+            uint32_t tMask = tm;
+
+            if (sMask || tMask) {
+                trip_and_die(sMask, tMask);
                 break;
             }
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         // Any SEH inside the monitor loop (AV from corrupted headers, illegal
-        // insn, etc.) is treated as tamper — never die silently.
-        trip_and_die();
+        // insn, etc.) is treated as tamper — never die silently. Reports the
+        // SEH_FAULT bit so the server can distinguish image corruption from
+        // ordinary anti_debug/anti_hook trips.
+        trip_and_die(bits::SEH_FAULT, 0);
     }
     s_running.store(false, std::memory_order_release);
     return 0;

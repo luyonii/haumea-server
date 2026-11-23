@@ -136,6 +136,41 @@ static void test_flush_once_returns_fast_on_network_stall() {
     stubs::g_post_sleep_ms.store(0);
 }
 
+// ---- trip-mask composition (Task 4) ---------------------------------------
+
+// Pure test of the mask-building helper. The full trip path (scrub + flush
+// + terminate) cannot be driven in-process without corrupting the running
+// image, so the wiring from monitor_proc → compose_sentinel_mask →
+// heartbeat::report_trip is checked by static review (see Task 4 commit).
+static void test_compose_sentinel_mask() {
+    std::printf("[compose_sentinel_mask]\n");
+    using sentinel::detail::compose_sentinel_mask;
+    using namespace sentinel::bits;
+
+    ok("empty -> 0",
+       compose_sentinel_mask(0, 0, false, false, false, false) == 0);
+    ok("anti_debug bits pass through",
+       compose_sentinel_mask(0x3, 0, false, false, false, false) == 0x3u);
+    ok("anti_hook bits pass through",
+       compose_sentinel_mask(0, 0x5, false, false, false, false) == 0x5u);
+    ok("anti_debug | anti_hook OR",
+       compose_sentinel_mask(0x1, 0x2, false, false, false, false) == 0x3u);
+    ok("tamper bit",
+       compose_sentinel_mask(0, 0, true,  false, false, false) == TAMPER);
+    ok("canary_data bit",
+       compose_sentinel_mask(0, 0, false, true,  false, false) == CANARY_DATA);
+    ok("canary_code bit",
+       compose_sentinel_mask(0, 0, false, false, true,  false) == CANARY_CODE);
+    ok("seh_fault bit",
+       compose_sentinel_mask(0, 0, false, false, false, true)  == SEH_FAULT);
+    uint32_t all = 0xFFu | TAMPER | CANARY_DATA | CANARY_CODE | SEH_FAULT;
+    ok("all bits ORed",
+       compose_sentinel_mask(0x0F, 0xF0, true, true, true, true) == all);
+    ok("low bits do not collide with high bits",
+       (compose_sentinel_mask(0x0F, 0xF0, false, false, false, false) &
+        (TAMPER | CANARY_DATA | CANARY_CODE | SEH_FAULT)) == 0u);
+}
+
 // ----------------------------------------------------------------------------
 
 int main() {
@@ -148,6 +183,7 @@ int main() {
     test_scrub_callback_setter();
     test_heartbeat_canonical_includes_fields();
     test_flush_once_returns_fast_on_network_stall();
+    test_compose_sentinel_mask();
 
     std::printf("---- %d passed, %d failed ----\n", g_pass, g_fail);
     std::printf("Skipped (covered by static review):\n");
