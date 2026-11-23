@@ -2,9 +2,13 @@
 
 Internal operator dashboard. Vanilla HTML + ES modules, embedded into the Go
 binary via `//go:embed`. Served on the same private bind as the admin JSON
-endpoints (`127.0.0.1:8443` locally, `10.x.x.x:8443` over VPN in production).
-The `X-Admin-Token` header is the second factor behind the VPN peer identity,
-not a public-internet boundary.
+endpoints (`127.0.0.1:8443`). Reach it from a workstation with an SSH
+local-forward:
+
+    ssh -L 8443:127.0.0.1:8443 user@host
+
+Open `http://localhost:8443/admin/ui/`. SSH-key access is the first factor;
+the `X-Admin-Token` header is the second. Never bind on `0.0.0.0`.
 
 ## Layout
 
@@ -27,11 +31,10 @@ file under `static/`; rebuild (`go build`) after adding or editing assets.
 
 ## Wiring
 
-Call `admin_ui.Register(adminMux, adminToken)` from the same place that calls
-`srv.RegisterAdmin(...)` in `server/cmd/server/main.go`. Both share the private
-bind; browsers that reach the VPN subnet load
-`http://10.x.x.x:8443/admin/ui/` and the user is prompted for the token on
-first load. The wire-up is intentionally not added yet — that is the next task.
+Called from `server/cmd/server/main.go` on the admin mux, right after
+`srv.RegisterAdmin(...)`. Both share the loopback bind; the operator reaches
+`http://localhost:8443/admin/ui/` through an SSH local-forward and is
+prompted for the token on first load.
 
 ## Adding a resource
 
@@ -85,7 +88,9 @@ Example: a `clients` resource.
 
 ## Deployment posture
 
-Never mount `admin_ui.Register` on the public mux. The static files leak
-nothing by themselves (no project data, no endpoints beyond those your
-`Register` call added), but the `/admin/ui/` path is a tell that an admin
-surface exists, so keeping the private bind is part of the defense.
+Never mount `admin_ui.Register` on the public mux. The admin listener binds
+loopback only; access comes through an SSH local-forward keyed on the
+operator's SSH key. The static files leak nothing by themselves (no project
+data, no endpoints beyond those your `Register` call added), but the
+`/admin/ui/` path is a tell that an admin surface exists, so keeping the
+loopback bind is part of the defense.

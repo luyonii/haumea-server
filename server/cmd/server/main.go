@@ -231,9 +231,10 @@ func main() {
 		}()
 	}
 
-	// Admin listener (also private). Bind to the VPN interface IP so only VPN
-	// peers can reach it; 0.0.0.0 on this port would expose both the JSON
-	// admin endpoints and the dashboard to anyone who can see the host.
+	// Admin listener (also private). Bind to loopback only; reach it from a
+	// workstation via `ssh -L 8443:127.0.0.1:8443 user@vps`. A 0.0.0.0 bind
+	// on this port would expose the JSON admin endpoints and the dashboard
+	// to anyone who can see the host.
 	var adminSrv *http.Server
 	if cfg.AdminAddr != "" && cfg.AdminToken != "" {
 		amux := http.NewServeMux()

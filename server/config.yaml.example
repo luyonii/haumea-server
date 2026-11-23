@@ -4,9 +4,14 @@ metrics_addr:    "127.0.0.1:9090"
 # Admin endpoints (/api/v1/admin/* JSON) and the operator dashboard
 # (/admin/ui/, served from internal/admin_ui) share this one listener. Both
 # are gated by admin_token (X-Admin-Token header, constant-time compare).
-# Enable only when both admin_addr and admin_token are set. Bind to the VPN
-# interface IP in production (e.g. "10.0.0.1:8443" on the WireGuard side)
-# so only VPN peers can reach the dashboard. Loopback is fine for local dev.
+# Enable only when both admin_addr and admin_token are set. Keep the bind on
+# loopback; reach it from a workstation with an SSH local-forward against
+# the server's SSH key:
+#
+#   ssh -L 8443:127.0.0.1:8443 user@host
+#
+# Then open http://localhost:8443/admin/ui/ in the browser. SSH-key access
+# is the first factor; admin_token is the second.
 admin_addr:      "127.0.0.1:8443"
 admin_token:     "env:SB_ADMIN_TOKEN"
 
