@@ -773,10 +773,9 @@ func buildWatermark(hwidHex, licenseKey string, watermarkKey []byte) ([]byte, er
 	copy(wm[32:64], lh)
 
 	binary.LittleEndian.PutUint64(wm[64:72], uint64(time.Now().Unix()))
-	// TTL 24h; client enforces it after clock-rollback. Kill flag does NOT
-	// revoke a payload the client already fetched — tighten here once we add
-	// server-side payload revocation and reduce to ~1h to shrink the window.
-	binary.LittleEndian.PutUint64(wm[72:80], 86400)
+	// TTL 1h; client enforces after clock-rollback. Shortens the window where a
+	// payload fetched before kill/revoke stays useful.
+	binary.LittleEndian.PutUint64(wm[72:80], 3600)
 
 	nonce, err := crypto.RandBytes(16)
 	if err != nil {
