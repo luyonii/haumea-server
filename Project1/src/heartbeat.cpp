@@ -10,6 +10,8 @@
 #include <atomic>
 #include <string>
 #include <cstring>
+#include <future>
+#include <chrono>
 
 namespace heartbeat {
 
@@ -32,6 +34,12 @@ static int         s_interval   = 60;
 static std::atomic<bool>        s_running{false};
 static std::atomic<stop_reason> s_reason{stop_reason::requested};
 
+// Sentinel/tool trip masks folded into each heartbeat. OR-set by report_trip,
+// never cleared here (server owns trip state). relaxed: no ordering needed, the
+// value is only observed, not used to gate other memory.
+static std::atomic<uint32_t> g_sentinel_mask{0};
+static std::atomic<uint32_t> g_tool_mask{0};
+
 static fn_CreateEventA  pCreateEvent;
 static fn_SetEvent      pSetEvent;
 static fn_WaitForSingle pWaitFor;
@@ -52,6 +60,46 @@ static uint64_t now_unix() {
     return (ft100 - 116444736000000000ULL) / 10000000ULL;
 }
 
+// Build, sign and POST one heartbeat from the current session state and trip
+// masks. Returns the raw server response (status_code 0 on HMAC failure, which
+// callers treat as a failed beat). Does not mutate s_nonce; the tick loop owns
+// nonce rotation from the response.
+static net::response send_once() {
+    auto ts = std::to_string(static_cast<int64_t>(now_unix()));
+    uint32_t sMask = g_sentinel_mask.load(std::memory_order_relaxed);
+    uint32_t tMask = g_tool_mask.load(std::memory_order_relaxed);
+
+    // HMAC canonical: "<timestamp>|<sentinel_mask>|<tool_mask>", decimal ASCII,
+    // no leading zeros, no sign, no quotes. Must match the Go server verbatim.
+    std::string canon = ts + "|" + std::to_string(sMask) + "|" + std::to_string(tMask);
+
+    uint8_t hmac[32]{};
+    if (!auth::hmac_sha256(s_key, 32,
+            reinterpret_cast<const uint8_t*>(canon.data()), canon.size(),
+            hmac))
+    {
+        return net::response{}; // status_code == 0
+    }
+
+    auto hmac_b64 = base64::encode(hmac, 32);
+    volatile uint8_t* hp = hmac;
+    for (int i = 0; i < 32; ++i) hp[i] = 0;
+
+    auto body = json::object({
+        {"session_token", s_token},
+        {"hmac",          hmac_b64},
+        {"timestamp",     ts},
+        {"next_nonce",    s_nonce}
+    });
+    // json::object quotes every value; sentinel_mask/tool_mask must be bare JSON
+    // integers, so splice them in by hand before the closing brace.
+    body.pop_back(); // drop '}'
+    body += ",\"sentinel_mask\":" + std::to_string(sMask)
+          + ",\"tool_mask\":"     + std::to_string(tMask) + "}";
+
+    return net::post(OBF("/api/v1/session/heartbeat"), body);
+}
+
 // ---- Thread ----
 
 static DWORD WINAPI thread_proc(LPVOID) {
@@ -61,30 +109,7 @@ static DWORD WINAPI thread_proc(LPVOID) {
         DWORD w = pWaitFor(s_stop_event, static_cast<DWORD>(s_interval) * 1000);
         if (w != WAIT_TIMEOUT) break; // stop signaled
 
-        auto ts = std::to_string(static_cast<int64_t>(now_unix()));
-
-        // HMAC-SHA256(key=session_key, data=timestamp)
-        uint8_t hmac[32]{};
-        if (!auth::hmac_sha256(s_key, 32,
-                reinterpret_cast<const uint8_t*>(ts.data()), ts.size(),
-                hmac))
-        {
-            if (++fails >= 3) { s_reason.store(stop_reason::failed, std::memory_order_release); break; }
-            continue;
-        }
-
-        auto hmac_b64 = base64::encode(hmac, 32);
-        volatile uint8_t* hp = hmac;
-        for (int i = 0; i < 32; ++i) hp[i] = 0;
-
-        auto body = json::object({
-            {"session_token", s_token},
-            {"hmac",          hmac_b64},
-            {"timestamp",     ts},
-            {"next_nonce",    s_nonce}
-        });
-
-        auto resp = net::post(OBF("/api/v1/session/heartbeat"), body);
+        auto resp = send_once();
 
         if (resp.status_code == 200) {
             fails = 0;
@@ -186,5 +211,31 @@ void stop() {
 
 bool is_running()         { return s_running.load(std::memory_order_acquire); }
 stop_reason get_stop_reason() { return s_reason.load(std::memory_order_acquire); }
+
+void report_trip(uint32_t sentinel_mask, uint32_t tool_mask) noexcept {
+    g_sentinel_mask.fetch_or(sentinel_mask, std::memory_order_relaxed);
+    g_tool_mask.fetch_or(tool_mask, std::memory_order_relaxed);
+}
+
+bool flush_once(uint32_t timeout_ms) noexcept {
+    try {
+        // Heap-allocated on purpose: std::future's destructor from std::async
+        // blocks (joins) until the task finishes, which would defeat the
+        // deadline on a wedged network. On timeout we abandon (leak) the future
+        // so its destructor never runs on this thread; the async task keeps
+        // running detached. The real caller (sentinel abort) terminates the
+        // process immediately after, so the leak is irrelevant.
+        auto* fut = new std::future<net::response>(
+            std::async(std::launch::async, [] { return send_once(); }));
+        if (fut->wait_for(std::chrono::milliseconds(timeout_ms)) == std::future_status::ready) {
+            net::response r = fut->get();
+            delete fut;
+            return r.status_code == 200;
+        }
+        return false; // timed out: fut intentionally leaked
+    } catch (...) {
+        return false;
+    }
+}
 
 } // namespace heartbeat
