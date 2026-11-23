@@ -2,8 +2,10 @@ package api
 
 import (
 	"crypto/subtle"
+	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -48,6 +50,12 @@ func observe(path string, h http.HandlerFunc) http.Handler {
 		ctx := WithRequestID(r.Context(), rid)
 		r = r.WithContext(ctx)
 
+		if requireHTTPS && !proxyAssertsHTTPS(r) {
+			httpRequestsTotal.WithLabelValues(path, "403").Inc()
+			http.Error(w, `{"error":"https_required"}`, http.StatusForbidden)
+			return
+		}
+
 		ip := clientIP(r)
 
 		// Per-route rate limit (in-process token bucket).
@@ -84,4 +92,20 @@ func observe(path string, h http.HandlerFunc) http.Handler {
 			"remote_ip", ip,
 		)
 	})
+}
+
+// proxyAssertsHTTPS is true only when the request arrived from a trusted proxy
+// (the nginx TLS terminator) that set X-Forwarded-Proto: https. A direct
+// connection, whose RemoteAddr is not a trusted proxy, is never trusted to
+// assert its own scheme, so an attacker on the plain bind cannot forge it.
+func proxyAssertsHTTPS(r *http.Request) bool {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	remote := net.ParseIP(host)
+	if remote == nil || !isTrustedProxy(remote) {
+		return false
+	}
+	return strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
 }

@@ -36,11 +36,11 @@ func (r *Redis) TakeChallenge(ctx context.Context, hwid string) (string, error) 
 // ---- Sessions ----
 
 type Session struct {
-	LicenseID   int64     `json:"license_id"`
-	HWID        string    `json:"hwid"`
-	SessionKey  string    `json:"session_key_b64"`
-	NextNonce   string    `json:"next_nonce_b64"`
-	ExpiresAt   time.Time `json:"expires_at"`
+	LicenseID  int64     `json:"license_id"`
+	HWID       string    `json:"hwid"`
+	SessionKey string    `json:"session_key_b64"`
+	NextNonce  string    `json:"next_nonce_b64"`
+	ExpiresAt  time.Time `json:"expires_at"`
 }
 
 func (r *Redis) PutSession(ctx context.Context, token string, s *Session, ttl time.Duration) error {
@@ -119,14 +119,23 @@ func (r *Redis) IsRevoked(ctx context.Context, licenseID int64) (bool, error) {
 
 // ---- Rate limit ----
 
+// allowScript is an atomic fixed-window counter: INCR, and set the 60s TTL on
+// the first hit OR whenever the key somehow lost its expiry. Running it as a
+// single Lua call removes the INCR/EXPIRE race that could otherwise leave a key
+// with no TTL (permanent lockout of that IP/HWID).
+var allowScript = redis.NewScript(`
+local n = redis.call('INCR', KEYS[1])
+if n == 1 or redis.call('TTL', KEYS[1]) < 0 then
+  redis.call('EXPIRE', KEYS[1], ARGV[1])
+end
+return n
+`)
+
 // Allow returns true if the per-minute counter under key is under limit. Fixed window.
 func (r *Redis) Allow(ctx context.Context, key string, limit int) (bool, error) {
-	n, err := r.C.Incr(ctx, key).Result()
+	n, err := allowScript.Run(ctx, r.C, []string{key}, 60).Int64()
 	if err != nil {
 		return false, err
-	}
-	if n == 1 {
-		_ = r.C.Expire(ctx, key, time.Minute).Err()
 	}
 	return n <= int64(limit), nil
 }

@@ -19,7 +19,7 @@ func TestGenerateLicenseKeyFormat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("gen: %v", err)
 	}
-	if !strings.HasPrefix(k, "SB-") || len(k) != 3+16 {
+	if !strings.HasPrefix(k, "SB-") || len(k) != 3+32 {
 		t.Fatalf("bad key: %q", k)
 	}
 	for _, c := range k[3:] {
@@ -77,7 +77,7 @@ func TestAdminLicenseIntegration(t *testing.T) {
 		if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
 			t.Fatalf("decode: %v", err)
 		}
-		if !strings.HasPrefix(out.LicenseKey, "SB-") || len(out.LicenseKey) != 3+16 {
+		if !strings.HasPrefix(out.LicenseKey, "SB-") || len(out.LicenseKey) != 3+32 {
 			t.Fatalf("bad key: %q", out.LicenseKey)
 		}
 		if out.LicenseID == 0 || out.CreatedAt == "" {

@@ -61,3 +61,42 @@ func TestParseTrustedProxies(t *testing.T) {
 		t.Fatalf("expected error for bad entry")
 	}
 }
+
+// TestProxyAssertsHTTPS covers the require_https gate: X-Forwarded-Proto is
+// trusted ONLY from a trusted proxy, so a direct attacker on the plain bind
+// cannot forge https even with the header set.
+func TestProxyAssertsHTTPS(t *testing.T) {
+	saved := trustedProxyNets
+	t.Cleanup(func() { trustedProxyNets = saved })
+	nets, err := parseTrustedProxies([]string{"10.0.0.0/8"})
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	trustedProxyNets = nets
+
+	mk := func(remote, xfp string) *http.Request {
+		r := &http.Request{RemoteAddr: remote, Header: http.Header{}}
+		if xfp != "" {
+			r.Header.Set("X-Forwarded-Proto", xfp)
+		}
+		return r
+	}
+	cases := []struct {
+		name, remote, xfp string
+		want              bool
+	}{
+		{"trusted_https", "10.1.2.3:9000", "https", true},
+		{"trusted_https_mixed_case", "10.1.2.3:9000", "HTTPS", true},
+		{"trusted_http", "10.1.2.3:9000", "http", false},
+		{"trusted_no_header", "10.1.2.3:9000", "", false},
+		{"untrusted_forged_https", "203.0.113.5:1234", "https", false},
+		{"unparseable_remote", "garbage", "https", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := proxyAssertsHTTPS(mk(c.remote, c.xfp)); got != c.want {
+				t.Fatalf("got %v want %v", got, c.want)
+			}
+		})
+	}
+}

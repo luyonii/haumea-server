@@ -47,9 +47,9 @@ func (s *Server) RegisterAdmin(mux *http.ServeMux, token string) {
 
 var adminPrefixRe = regexp.MustCompile(`^[A-Z0-9]{1,8}$`)
 
-// generateLicenseKey returns "<prefix>-<16 hex uppercase>" (8 random bytes).
+// generateLicenseKey returns "<prefix>-<32 hex uppercase>" (16 random bytes = 128 bits).
 func generateLicenseKey(prefix string) (string, error) {
-	var b [8]byte
+	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		return "", err
 	}
@@ -80,7 +80,7 @@ func (s *Server) handleAdminCreateLicense(w http.ResponseWriter, r *http.Request
 		writeErr(w, http.StatusBadRequest, "bad_request", "invalid prefix")
 		return
 	}
-	// prefix(<=8) + "-" + 16 hex = <=25 chars, well under the 64 cap.
+	// prefix(<=8) + "-" + 32 hex = <=41 chars, well under the 64 cap.
 	var notePtr *string
 	if n := strings.TrimSpace(req.Note); n != "" {
 		if len(n) > 512 {
@@ -254,7 +254,20 @@ func (s *Server) isRevoked(ctx context.Context, licenseID int64) bool {
 	}
 	rev, err := s.PG.IsRevoked(ctx, licenseID)
 	if err != nil {
-		return false
+		// Fail closed: a DB error means we cannot confirm "not revoked", so
+		// treat as revoked rather than let a possibly-revoked license through.
+		return true
 	}
 	return rev
+}
+
+// enforcementBlocked reports kill/revoke state for a license, failing CLOSED:
+// a KillStatus DB error (or an unresolvable revoke check) returns true, so a
+// transient Postgres/Redis outage cannot keep a killed/revoked session alive.
+func (s *Server) enforcementBlocked(ctx context.Context, licenseID int64) (killed, revoked bool) {
+	k, err := s.PG.KillStatus(ctx, licenseID)
+	if err != nil {
+		k = true
+	}
+	return k, s.isRevoked(ctx, licenseID)
 }
