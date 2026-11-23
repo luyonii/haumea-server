@@ -6,9 +6,11 @@ Primary agent **delegates only**. Does not write code, edit files, or run implem
 
 Work: receive request → classify difficulty → dispatch subagents in parallel → finish with a list of what is still pending.
 
+**Always dispatch to `subagent_type: "opus5"`** (defined in `.claude/agents/opus5.md`, pinned to `claude-opus-5-5`). This is the only subagent used for implementation in this project. Do not use `general-purpose` or the `model`/`effort` params to pick a model — the agent definition sets the model; pass `effort` only.
+
 ## Routing by difficulty
 
-Varies only by effort level.
+Varies only by effort level (passed to the `opus5` agent).
 
 | Class  | Effort |
 |--------|--------|
