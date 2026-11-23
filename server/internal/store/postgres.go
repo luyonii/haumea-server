@@ -70,6 +70,36 @@ func (p *PG) InsertLicense(ctx context.Context, key string, note *string) (int64
 	return id, createdAt, err
 }
 
+// ListLicenses returns up to `limit` licenses ordered by created_at DESC. It
+// joins the same tables as LicenseStatusByKey so the shape matches, giving
+// the admin dashboard a scannable row set without a second round trip per
+// license. The limit is clamped by the caller (admin.go caps it at 500).
+func (p *PG) ListLicenses(ctx context.Context, limit int) ([]LicenseStatus, error) {
+	rows, err := p.Pool.Query(ctx,
+		`SELECT l.id, l.license_key, l.banned, l.revoked_at, l.created_at, l.note,
+		        b.hwid, b.bound_at, k.license_id IS NOT NULL
+		   FROM licenses l
+		   LEFT JOIN hwid_binds b   ON b.license_id = l.id
+		   LEFT JOIN license_kill k ON k.license_id = l.id
+		  ORDER BY l.created_at DESC
+		  LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []LicenseStatus
+	for rows.Next() {
+		var s LicenseStatus
+		if err := rows.Scan(&s.ID, &s.Key, &s.Banned, &s.RevokedAt, &s.CreatedAt, &s.Note,
+			&s.HWID, &s.BoundAt, &s.Killed); err != nil {
+			return nil, err
+		}
+		s.Revoked = s.RevokedAt != nil
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
 // LicenseStatusByKey returns a joined status snapshot for admin inspection.
 func (p *PG) LicenseStatusByKey(ctx context.Context, key string) (*LicenseStatus, error) {
 	var s LicenseStatus

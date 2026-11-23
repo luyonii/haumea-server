@@ -13,7 +13,7 @@
 <div class="layout">
     <nav class="sidebar">
         <ul class="resource-list">
-            <li class="resource active" data-resource="records">Records</li>
+            <li class="resource active" data-resource="licenses">Licenses</li>
         </ul>
     </nav>
     <main class="main">
@@ -23,12 +23,8 @@
         </div>
         <div class="table-wrap">
             <table class="data-table">
-                <thead>
-                    <tr><th>ID</th><th>Name</th><th>Created At</th></tr>
-                </thead>
-                <tbody id="data-body">
-                    <tr class="empty"><td colspan="3">No records.</td></tr>
-                </tbody>
+                <thead id="data-head"></thead>
+                <tbody id="data-body"></tbody>
             </table>
         </div>
     </main>

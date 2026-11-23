@@ -70,18 +70,32 @@ export function closeModal(id) { document.getElementById(id)?.classList.add('hid
 // table renderer uses. Add new resources here plus a <li> in index.html
 // and (optionally) a Go handler in handler.go.
 const RESOURCES = {
-    records: {
-        path: '/admin/ui/api/records',
-        columns: ['id', 'name', 'created_at'],
+    licenses: {
+        path: '/api/v1/admin/licenses',
+        columns: ['id', 'key', 'hwid', 'banned', 'revoked', 'killed', 'created_at'],
+        labels:  ['ID', 'Key', 'HWID', 'Banned', 'Revoked', 'Killed', 'Created'],
     },
 };
 
-let current = 'records';
+let current = 'licenses';
+
+function renderHead(thead, labels) {
+    thead.innerHTML = '';
+    const tr = document.createElement('tr');
+    for (const l of labels) {
+        const th = document.createElement('th');
+        th.textContent = l;
+        tr.appendChild(th);
+    }
+    thead.appendChild(tr);
+}
 
 async function load(resource) {
     const spec = RESOURCES[resource];
     if (!spec) return;
+    const thead = document.getElementById('data-head');
     const tbody = document.getElementById('data-body');
+    renderHead(thead, spec.labels || spec.columns);
     try {
         const rows = await fetchJSON(spec.path);
         renderTable(tbody, rows, spec.columns);

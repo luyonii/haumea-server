@@ -8,6 +8,7 @@ import (
 	"errors"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -43,6 +44,7 @@ func (s *Server) RegisterAdmin(mux *http.ServeMux, token string) {
 	reg("/api/v1/admin/revoke", s.handleAdminRevoke)
 	reg("/api/v1/admin/license", s.handleAdminCreateLicense)
 	reg("/api/v1/admin/license/{key}", s.handleAdminLicenseStatus)
+	reg("/api/v1/admin/licenses", s.handleAdminListLicenses)
 }
 
 var adminPrefixRe = regexp.MustCompile(`^[A-Z0-9]{1,8}$`)
@@ -188,6 +190,51 @@ func (s *Server) handleAdminLicenseStatus(w http.ResponseWriter, r *http.Request
 	}
 	if st.Note != nil {
 		out["note"] = *st.Note
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// handleAdminListLicenses returns a JSON array of licenses sorted newest-first.
+// Pagination is one knob: ?limit=N (default 100, max 500). No offset for now;
+// a later cursor can replace it when real volume demands it.
+func (s *Server) handleAdminListLicenses(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "GET only")
+		return
+	}
+	limit := 100
+	if q := r.URL.Query().Get("limit"); q != "" {
+		if n, err := strconv.Atoi(q); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	if limit > 500 {
+		limit = 500
+	}
+	rows, err := s.PG.ListLicenses(r.Context(), limit)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "server_error", "db")
+		return
+	}
+	out := make([]map[string]any, 0, len(rows))
+	for _, st := range rows {
+		hwid := ""
+		if st.HWID != nil {
+			h := *st.HWID
+			if len(h) > 16 {
+				h = h[:16]
+			}
+			hwid = h
+		}
+		out = append(out, map[string]any{
+			"id":         st.ID,
+			"key":        st.Key,
+			"hwid":       hwid,
+			"banned":     st.Banned,
+			"revoked":    st.Revoked,
+			"killed":     st.Killed,
+			"created_at": st.CreatedAt.UTC().Format(time.RFC3339),
+		})
 	}
 	writeJSON(w, http.StatusOK, out)
 }
