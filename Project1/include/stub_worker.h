@@ -52,6 +52,7 @@ extern "C" {
 #define SB_RC_PE_PROTECT_FAIL       0xDEAD0037u
 #define SB_RC_DLLMAIN_FAIL          0xDEAD0038u
 #define SB_RC_BCRYPT_LOAD_FAIL      0xDEAD0039u
+#define SB_RC_PE_TLS_FAIL           0xDEAD003Au
 
 #pragma pack(push, 8)
 struct sb_worker_args {

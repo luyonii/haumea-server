@@ -151,6 +151,18 @@ struct sb_base_reloc {
     uint32_t VirtualAddress;
     uint32_t SizeOfBlock;
 };
+
+// IMAGE_TLS_DIRECTORY32 — AddressOfCallBacks is a VA (not RVA) pointing to a
+// null-terminated array of VA function pointers. Both get patched by base
+// relocations when the image is mapped at a non-preferred base.
+struct sb_tls_dir32 {
+    uint32_t StartAddressOfRawData;
+    uint32_t EndAddressOfRawData;
+    uint32_t AddressOfIndex;
+    uint32_t AddressOfCallBacks;
+    uint32_t SizeOfZeroFill;
+    uint32_t Characteristics;
+};
 #pragma pack(pop)
 
 // ------------------- PE constants --------------------------------
@@ -160,6 +172,7 @@ struct sb_base_reloc {
 #define SB_OPT_PE32           0x010Bu
 #define SB_DIR_IMPORT         1
 #define SB_DIR_BASERELOC      5
+#define SB_DIR_TLS            9
 #define SB_SCN_EXEC           0x20000000u
 #define SB_SCN_READ           0x40000000u
 #define SB_SCN_WRITE          0x80000000u
@@ -456,18 +469,23 @@ static uint32_t sb_map_pe(struct sb_worker_args* a,
                        (uint8_t*)iat  + 4 <= image_end &&
                        *orig != 0)
                 {
+                    void* fn = (void*)0;
                     if (*orig & SB_IMPORT_BY_ORDINAL) {
-                        vfree(base, 0, SB_MEM_RELEASE);
-                        return SB_RC_PE_IMPORT_FAIL; // ordinal unsupported
+                        // GetProcAddress(mod, MAKEINTRESOURCEA(ord)) — Windows
+                        // encodes "lookup by ordinal" as a pointer whose high
+                        // bits are zero and the low 16 are the ordinal.
+                        uint32_t ord = *orig & 0xFFFFu;
+                        fn = gpa(mod, (const char*)(uintptr_t)ord);
+                    } else {
+                        uint32_t name_rva = *orig;
+                        if (name_rva + 3 >= image_size) {
+                            vfree(base, 0, SB_MEM_RELEASE);
+                            return SB_RC_PE_IMPORT_FAIL;
+                        }
+                        // IMAGE_IMPORT_BY_NAME = WORD Hint; char Name[].
+                        char* fn_name = (char*)(base + name_rva + 2);
+                        fn = gpa(mod, fn_name);
                     }
-                    uint32_t name_rva = *orig;
-                    if (name_rva + 3 >= image_size) {
-                        vfree(base, 0, SB_MEM_RELEASE);
-                        return SB_RC_PE_IMPORT_FAIL;
-                    }
-                    // IMAGE_IMPORT_BY_NAME = WORD Hint; char Name[].
-                    char* fn_name = (char*)(base + name_rva + 2);
-                    void* fn = gpa(mod, fn_name);
                     if (!fn) {
                         vfree(base, 0, SB_MEM_RELEASE);
                         return SB_RC_PE_IMPORT_FAIL;
@@ -497,6 +515,52 @@ static uint32_t sb_map_pe(struct sb_worker_args* a,
         {
             vfree(base, 0, SB_MEM_RELEASE);
             return SB_RC_PE_PROTECT_FAIL;
+        }
+    }
+
+    // --- TLS callbacks ---
+    // Normal loader fires these between IAT fixup and DllMain. AddressOfCallBacks
+    // is a VA (not RVA) that base relocs patched above; dereference it as a
+    // null-terminated array of callback VAs. Each callback is called with the
+    // same signature as DllMain; ignore the void return.
+    {
+        struct sb_data_directory* tdir =
+            &nt_dst->OptionalHeader.DataDirectory[SB_DIR_TLS];
+        if (tdir->Size && tdir->VirtualAddress) {
+            if (tdir->VirtualAddress > image_size ||
+                (uint64_t)tdir->VirtualAddress + sizeof(struct sb_tls_dir32) > image_size)
+            {
+                vfree(base, 0, SB_MEM_RELEASE);
+                return SB_RC_PE_TLS_FAIL;
+            }
+            struct sb_tls_dir32* tls =
+                (struct sb_tls_dir32*)(base + tdir->VirtualAddress);
+            if (tls->AddressOfCallBacks) {
+                uint32_t cb_va = tls->AddressOfCallBacks;
+                uint32_t base_va = (uint32_t)(uintptr_t)base;
+                uint32_t image_end_va = base_va + image_size;
+                if (cb_va < base_va || cb_va >= image_end_va) {
+                    vfree(base, 0, SB_MEM_RELEASE);
+                    return SB_RC_PE_TLS_FAIL;
+                }
+                uint32_t* cbs = (uint32_t*)(uintptr_t)cb_va;
+                // Defensive cap: a corrupted array must not loop forever.
+                for (uint32_t k = 0; k < 64; ++k) {
+                    if ((uint32_t)(uintptr_t)(cbs + 1) > image_end_va) {
+                        vfree(base, 0, SB_MEM_RELEASE);
+                        return SB_RC_PE_TLS_FAIL;
+                    }
+                    uint32_t cb = *cbs;
+                    if (cb == 0) break;
+                    if (cb < base_va || cb >= image_end_va) {
+                        vfree(base, 0, SB_MEM_RELEASE);
+                        return SB_RC_PE_TLS_FAIL;
+                    }
+                    pfn_dll_main tls_cb = (pfn_dll_main)(uintptr_t)cb;
+                    tls_cb((void*)(uintptr_t)base, SB_DLL_PROCESS_ATTACH, (void*)0);
+                    cbs++;
+                }
+            }
         }
     }
 
