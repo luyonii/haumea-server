@@ -18,6 +18,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/secblind/server/internal/admin_ui"
 	"github.com/secblind/server/internal/api"
 	"github.com/secblind/server/internal/store"
 )
@@ -57,6 +58,7 @@ type config struct {
 	TrustedProxies []string `yaml:"trusted_proxies"`
 	EnableDebug    bool     `yaml:"enable_debug"`
 	DebugToken     string   `yaml:"debug_token"`
+	RequireHTTPS   bool     `yaml:"require_https"`
 }
 
 func loadConfig(path string) (*config, error) {
@@ -182,6 +184,7 @@ func main() {
 		TrustedProxies:    cfg.TrustedProxies,
 		EnableDebug:       cfg.EnableDebug,
 		DebugToken:        cfg.DebugToken,
+		RequireHTTPS:      cfg.RequireHTTPS,
 	}
 	srv := api.New(pg, rdb, apiCfg)
 
@@ -228,11 +231,14 @@ func main() {
 		}()
 	}
 
-	// Admin listener (also private).
+	// Admin listener (also private). Bind to the VPN interface IP so only VPN
+	// peers can reach it; 0.0.0.0 on this port would expose both the JSON
+	// admin endpoints and the dashboard to anyone who can see the host.
 	var adminSrv *http.Server
 	if cfg.AdminAddr != "" && cfg.AdminToken != "" {
 		amux := http.NewServeMux()
 		srv.RegisterAdmin(amux, cfg.AdminToken)
+		admin_ui.Register(amux, cfg.AdminToken)
 		adminSrv = &http.Server{
 			Addr:              cfg.AdminAddr,
 			Handler:           amux,

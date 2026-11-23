@@ -1,8 +1,12 @@
 listen:          "127.0.0.1:8080"
 # Prometheus /metrics — MUST stay on a private bind (never 0.0.0.0).
 metrics_addr:    "127.0.0.1:9090"
-# Admin endpoint /api/v1/admin/revoke. Both admin_addr and admin_token must be
-# set to enable it; keep on a private bind (127.0.0.1 or VPN/internal CIDR).
+# Admin endpoints (/api/v1/admin/* JSON) and the operator dashboard
+# (/admin/ui/, served from internal/admin_ui) share this one listener. Both
+# are gated by admin_token (X-Admin-Token header, constant-time compare).
+# Enable only when both admin_addr and admin_token are set. Bind to the VPN
+# interface IP in production (e.g. "10.0.0.1:8443" on the WireGuard side)
+# so only VPN peers can reach the dashboard. Loopback is fine for local dev.
 admin_addr:      "127.0.0.1:8443"
 admin_token:     "env:SB_ADMIN_TOKEN"
 
