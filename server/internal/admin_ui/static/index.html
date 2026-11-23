@@ -9,6 +9,7 @@
 <body>
 <header class="topbar">
     <div class="title">Admin</div>
+    <div id="toast" class="toast hidden"></div>
 </header>
 <div class="layout">
     <nav class="sidebar">
@@ -20,6 +21,7 @@
         <div class="filter-row">
             <input id="filter" class="filter-input" placeholder="Filter…" type="text">
             <button id="refresh" class="btn">Refresh</button>
+            <button id="new-btn" class="btn btn-primary hidden">+ New</button>
         </div>
         <div class="table-wrap">
             <table class="data-table">
@@ -34,21 +36,27 @@
             <button class="btn-link" data-close="detail-panel">Close</button>
         </div>
         <dl class="detail-fields" id="detail-fields"></dl>
-        <button id="edit-btn" class="btn btn-primary">Edit</button>
+        <button id="action-btn" class="btn btn-primary hidden"></button>
     </aside>
 </div>
-<div id="edit-modal" class="modal hidden">
-    <div class="modal-backdrop" data-close="edit-modal"></div>
+<div id="new-license-modal" class="modal hidden">
+    <div class="modal-backdrop" data-close="new-license-modal"></div>
     <div class="modal-body">
         <div class="modal-header">
-            <div class="modal-title">Edit</div>
-            <button class="btn-link" data-close="edit-modal">Close</button>
+            <div class="modal-title">New license</div>
+            <button class="btn-link" data-close="new-license-modal">Close</button>
         </div>
-        <form id="edit-form">
-            <label>Name<input type="text" name="name"></label>
+        <form id="new-license-form">
+            <label>Prefix (optional, A-Z 0-9, up to 8 chars; default SB)
+                <input type="text" name="prefix" maxlength="8" pattern="[A-Z0-9]*"
+                       style="text-transform: uppercase" autocomplete="off">
+            </label>
+            <label>Note (optional, up to 512 chars)
+                <input type="text" name="note" maxlength="512" autocomplete="off">
+            </label>
             <div class="modal-actions">
-                <button type="button" class="btn" data-close="edit-modal">Cancel</button>
-                <button type="submit" class="btn btn-primary">Save</button>
+                <button type="button" class="btn" data-close="new-license-modal">Cancel</button>
+                <button type="submit" class="btn btn-primary">Create</button>
             </div>
         </form>
     </div>
