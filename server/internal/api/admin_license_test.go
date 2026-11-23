@@ -137,6 +137,60 @@ func TestAdminLicenseIntegration(t *testing.T) {
 			t.Fatalf("status=%d want 404", w.Code)
 		}
 	})
+
+	t.Run("list_includes_just_created_key", func(t *testing.T) {
+		// Create a row with a distinctive prefix so we can find it among
+		// whatever else lives in this DB.
+		body := `{"prefix":"TLST","note":"list-test"}`
+		rc := httptest.NewRequest("POST", "/api/v1/admin/license", strings.NewReader(body))
+		wc := httptest.NewRecorder()
+		s.handleAdminCreateLicense(wc, rc)
+		if wc.Code != http.StatusCreated {
+			t.Fatalf("precreate: %d body=%s", wc.Code, wc.Body.String())
+		}
+		var made struct {
+			LicenseKey string `json:"license_key"`
+		}
+		_ = json.Unmarshal(wc.Body.Bytes(), &made)
+
+		rl := httptest.NewRequest("GET", "/api/v1/admin/licenses?limit=50", nil)
+		wl := httptest.NewRecorder()
+		s.handleAdminListLicenses(wl, rl)
+		if wl.Code != http.StatusOK {
+			t.Fatalf("list: %d body=%s", wl.Code, wl.Body.String())
+		}
+		var rows []map[string]any
+		if err := json.Unmarshal(wl.Body.Bytes(), &rows); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		found := false
+		for _, row := range rows {
+			if row["key"] == made.LicenseKey {
+				found = true
+				// Columns the dashboard reads must all be present.
+				for _, k := range []string{"id", "key", "hwid", "banned", "revoked", "killed", "created_at"} {
+					if _, ok := row[k]; !ok {
+						t.Fatalf("row missing %q: %+v", k, row)
+					}
+				}
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("created key %q not in list of %d rows", made.LicenseKey, len(rows))
+		}
+	})
+}
+
+// Unit: list endpoint rejects non-GET without touching the DB.
+func TestListLicensesMethodGuard(t *testing.T) {
+	s := &Server{} // PG unused; the method check runs first.
+	r := httptest.NewRequest("POST", "/api/v1/admin/licenses", nil)
+	w := httptest.NewRecorder()
+	s.handleAdminListLicenses(w, r)
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status=%d want 405", w.Code)
+	}
 }
 
 // Auth is enforced by the adminAuth wrapper, which already has coverage in
