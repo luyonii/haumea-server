@@ -212,8 +212,29 @@ Spec says not to edit `Project1.sln` automatically. To add it in Visual Studio:
 
 ## Server-primary auto-ban E2E — 2026-11-23
 
-Status: **not yet executed**. Requires coordinated deploy of client + server
-(canonical do HMAC mudou em lockstep). Target: staging VPS `65.108.60.114`.
+Status: **PASS on 2026-11-23** against staging VPS `65.108.60.114`.
+Exercised the server-side path with `server/cmd/e2e_autoban` (small Go
+driver that signs and sends two heartbeats with `sentinel_mask=1`).
+Client-side wiring in `sentinel.cpp` is unit-covered by
+`test_compose_sentinel_mask` and the full trip path is review-only
+(image-corruption required to drive it in-process).
+
+Driver run (`e2e_autoban -key <test license>`) produced:
+- `hb1 -> {kill:false, revoked:false}`
+- `hb2 -> {kill:true,  revoked:true}`
+
+Postgres on the VPS after the run:
+- `abuse_log`: two rows `sentinel_trip:s=1,t=0` on the test license, 0.5 s apart.
+- `licenses.banned = t` on the test license.
+
+Prometheus `/metrics` on the VPS:
+- `sentinel_autoban_total 1` (was `0` before the run).
+
+Fresh `/auth/login` with the banned license and a valid challenge:
+- `HTTP 401 {"error":"invalid_credentials","message":""}`.
+
+Required a coordinated deploy of client + server because the heartbeat
+HMAC canonical changed in lockstep.
 
 Steps:
 
