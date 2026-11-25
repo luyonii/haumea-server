@@ -57,3 +57,9 @@ Thumbs.db
 
 # --- Tool output ---
 graphify-out/
+
+# --- Markdown (bloqueia novos; os já versionados seguem no repo) ---
+*.md
+
+# --- Claude Code (skills, agentes locais, settings) ---
+.claude/
