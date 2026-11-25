@@ -34,9 +34,16 @@ struct encrypted_string {
 
     decrypted_string<N> decrypt() const {
         decrypted_string<N> out;
+        // Read the ciphertext through a volatile pointer: with /O2 + LTCG the
+        // optimizer would otherwise constant-fold this constexpr decrypt() and
+        // re-materialize the PLAINTEXT in .rdata, eliding the XOR entirely
+        // (defeating the obfuscation — the root cause behind audit #4). A
+        // volatile load is an observable access the compiler must emit at
+        // runtime, so only the encrypted bytes live in the image.
+        const volatile char* src = data;
         for (size_t i = 0; i < N; ++i) {
             auto key = static_cast<uint8_t>(Seed ^ (i * 0xAD + 0x37));
-            out.buf[i] = static_cast<char>(static_cast<uint8_t>(data[i]) ^ key);
+            out.buf[i] = static_cast<char>(static_cast<uint8_t>(src[i]) ^ key);
         }
         return out;
     }
@@ -72,9 +79,12 @@ struct encrypted_wstring {
 
     decrypted_wstring<N> decrypt() const {
         decrypted_wstring<N> out;
+        // volatile load: keep the optimizer from folding decrypt() to plaintext
+        // in .rdata (see the narrow decrypt() above; audit #4).
+        const volatile wchar_t* src = data;
         for (size_t i = 0; i < N; ++i) {
             auto key = static_cast<uint16_t>(Seed ^ (i * 0xAD37u + 0x3719u));
-            out.buf[i] = static_cast<wchar_t>(static_cast<uint16_t>(data[i]) ^ key);
+            out.buf[i] = static_cast<wchar_t>(static_cast<uint16_t>(src[i]) ^ key);
         }
         return out;
     }
