@@ -111,7 +111,9 @@
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
-      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <!-- No debug directory in the shipped PE: strips the absolute PDB path
+           (user + project name) that symbol-leak audit item #3 flagged. -->
+      <GenerateDebugInformation>false</GenerateDebugInformation>
       <OptimizeReferences>false</OptimizeReferences>
       <EnableCOMDATFolding>false</EnableCOMDATFolding>
       <ImageHasSafeExceptionHandlers>false</ImageHasSafeExceptionHandlers>
@@ -141,7 +143,9 @@
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
-      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <!-- No debug directory in the shipped PE: strips the absolute PDB path
+           (user + project name) that symbol-leak audit item #3 flagged. -->
+      <GenerateDebugInformation>false</GenerateDebugInformation>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup>
