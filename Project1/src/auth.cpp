@@ -109,7 +109,7 @@ static bool hkdf_sha256(const uint8_t* ikm,  size_t ikm_len,
 // ---- Public API ----
 
 auth_result authenticate(const std::string& license_key, const std::string& hwid,
-                         uint32_t text_crc32, uint32_t code_fingerprint,
+                         const uint8_t running_digest[32],
                          uint32_t anti_debug_mask, uint32_t anti_hook_mask,
                          uint32_t tool_detect_mask, uint32_t anti_vm_mask) {
     auth_result result{};
@@ -141,35 +141,33 @@ auth_result authenticate(const std::string& license_key, const std::string& hwid
     // --- Step 2: derive key + compute challenge response ---
     auto nonce = base64::decode(challenge_b64);
 
-    // salt = hwid_bytes || "SecBlind_HKDF_v1" || LE32(text_crc32) || LE64(code_fingerprint)
+    // salt = hwid_bytes || "SecBlind_HKDF_v1" || running_digest(32)
     //        || LE32(anti_debug) || LE32(anti_hook) || LE32(tool_detect) || LE32(anti_vm)
-    // The trailing 28 bytes bind the client's own code integrity AND its raw
-    // anti-analysis detection masks into the key: a divergent binary or a client
-    // running in a detected environment derives a different key and the server
-    // rejects login (audit #1/#10).
+    // The trailing 48 bytes bind the client's own code integrity (the 32-byte
+    // interleaved multi-sample running digest) AND its raw anti-analysis
+    // detection masks into the key: a divergent binary or a client running in a
+    // detected environment derives a different key and the server rejects login
+    // (audit #1/#10, Fix B).
     auto salt_fixed = OBF("SecBlind_HKDF_v1");
     std::vector<uint8_t> salt;
     salt.insert(salt.end(), hwid.begin(), hwid.end());
     salt.insert(salt.end(), salt_fixed.c_str(),
                 salt_fixed.c_str() + salt_fixed.size());
-    uint8_t bind[28];
+    uint8_t bind[48];
+    for (int i = 0; i < 32; ++i) bind[i] = running_digest[i];
     auto put_le32 = [&bind](int off, uint32_t v) {
         bind[off + 0] = static_cast<uint8_t>(v);
         bind[off + 1] = static_cast<uint8_t>(v >> 8);
         bind[off + 2] = static_cast<uint8_t>(v >> 16);
         bind[off + 3] = static_cast<uint8_t>(v >> 24);
     };
-    put_le32(0, text_crc32);
-    uint64_t fp64 = code_fingerprint; // zero-extend uint32 -> LE64
-    for (int i = 0; i < 8; ++i)
-        bind[4 + i] = static_cast<uint8_t>(fp64 >> (8 * i));
-    put_le32(12, anti_debug_mask);
-    put_le32(16, anti_hook_mask);
-    put_le32(20, tool_detect_mask);
-    put_le32(24, anti_vm_mask);
-    salt.insert(salt.end(), bind, bind + 28);
+    put_le32(32, anti_debug_mask);
+    put_le32(36, anti_hook_mask);
+    put_le32(40, tool_detect_mask);
+    put_le32(44, anti_vm_mask);
+    salt.insert(salt.end(), bind, bind + 48);
 
-    // derived_key = HKDF-SHA256(IKM=license_key, salt=hwid||fixed||LE32(crc)||LE64(fp)||4×LE32(masks))
+    // derived_key = HKDF-SHA256(IKM=license_key, salt=hwid||fixed||running_digest(32)||4×LE32(masks))
     uint8_t derived_key[32]{};
     if (!hkdf_sha256(
             reinterpret_cast<const uint8_t*>(license_key.data()), license_key.size(),

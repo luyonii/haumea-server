@@ -67,18 +67,29 @@ is almost always flagged by AV.
 
 ## Server bind baseline (audit #1/#10)
 
-Before deploying the server against a new client build, set **all six**
+Before deploying the server against a new client build, set **all five**
 `SECBLIND_EXPECTED_*` envs (the server fails closed at startup if any is empty).
 They are folded into the `/auth/login` HKDF salt; see SERVER_SPEC.md `/auth/login`.
 
 | env | value | source |
 |-----|-------|--------|
-| `SECBLIND_EXPECTED_TEXT_CRC32` | 8 hex | CRC32 of the shipped `.text` (final, post-pack) |
-| `SECBLIND_EXPECTED_CODE_FINGERPRINT` | ≤16 hex | client `canary::code_fingerprint()` of the shipped build |
+| `SECBLIND_EXPECTED_RUNNING_DIGEST` | 64 hex | `Project1.exe --print-baseline` on a clean reference machine (final, post-pack binary) |
 | `SECBLIND_EXPECTED_ANTI_DEBUG_MASK` | `00000000` | clean reference machine (no debugger) |
 | `SECBLIND_EXPECTED_ANTI_HOOK_MASK` | `00000000` | clean reference machine (no API hooks) |
 | `SECBLIND_EXPECTED_TOOL_DETECT_MASK` | `00000000` | clean reference machine (no analysis tools) |
 | `SECBLIND_EXPECTED_ANTI_VM_MASK` | `00000000` | bare-metal reference machine |
+
+To get the running digest, run the **shipped** binary once on a clean reference
+machine and copy the printed line verbatim into the server environment:
+
+```
+Project1.exe --print-baseline
+SECBLIND_EXPECTED_RUNNING_DIGEST=<64 hex chars>
+```
+
+This runs only the code-integrity sampling sequence (no gates, no auth, no
+heartbeat) and exits 0. The value is deterministic for a given binary — re-run
+to confirm it matches before deploying. Re-extract it on every client rebuild.
 
 The four detection masks are **zero on a legitimate machine**, so the operator
 normally sets them to `00000000` — no extraction step is required for them.
@@ -87,10 +98,7 @@ normally sets them to `00000000` — no extraction step is required for them.
 > a hypervisor (non-zero `anti_vm`) derives a different key and is **rejected at
 > login**, not merely flagged. If virtualised customers must be supported, this
 > binding needs rethinking (it conflicts with the anti_vm=WARN telemetry policy).
-> See the audit #1 Fix B / anti_vm follow-up.
-
-The crc / fingerprint baseline extraction (and the planned interleaved
-multi-sample running digest, audit #1 Fix B) is tracked separately.
+> See the anti_vm follow-up.
 
 ## Reproducibility
 

@@ -13,6 +13,7 @@
 #include <Windows.h>
 #include <cstdio>
 #include <cstring>
+#include <cwchar>
 #include <string>
 
 // File-scope snapshot of the payload sub-keys. Kept off the stack so the
@@ -58,12 +59,63 @@ void scrub_payload_key() {
 // wmain is used so the fallback target path from argv is already wide and
 // matches payload::load_and_execute's signature without a narrow->wide
 // conversion at the call site.
+// Interleaved multi-sample code-integrity running digest (audit #1 "Fix B").
+// Each use folds a live read of the .text CRC32 + code fingerprint, tagged with
+// the sample index k, into a 32-byte SHA-256 running digest. The digest later
+// keys the /auth/login HKDF salt, so a runtime patch of .text must stay intact
+// across EVERY sample point, not just the one early snapshot the old design took
+// — closing the "sample early, use late" window. k is distinct per point, which
+// both defeats accidental commutativity and keeps the compiler from folding the
+// expansions (identical-COMDAT folding). This is a macro, not a helper function,
+// on purpose: there must be no single `call sample_mix` an attacker can NOP to
+// disarm every point at once. SHA-256 is the only shared primitive; patching it
+// just corrupts the digest -> wrong key -> login rejected (fail-closed).
+#define SB_MIX_SAMPLE(digest, k) do {                                          \
+        uint8_t sb_buf[44];                                                    \
+        for (int sb_i = 0; sb_i < 32; ++sb_i) sb_buf[sb_i] = (digest)[sb_i];   \
+        uint32_t sb_crc = anti_tamper::text_section_crc32();                   \
+        uint32_t sb_fp  = canary::code_fingerprint();                          \
+        sb_buf[32] = (uint8_t)sb_crc;        sb_buf[33] = (uint8_t)(sb_crc>>8); \
+        sb_buf[34] = (uint8_t)(sb_crc>>16);  sb_buf[35] = (uint8_t)(sb_crc>>24);\
+        sb_buf[36] = (uint8_t)sb_fp;         sb_buf[37] = (uint8_t)(sb_fp>>8);  \
+        sb_buf[38] = (uint8_t)(sb_fp>>16);   sb_buf[39] = (uint8_t)(sb_fp>>24); \
+        sb_buf[40] = (uint8_t)((k));         sb_buf[41] = (uint8_t)((k)>>8);    \
+        sb_buf[42] = (uint8_t)((k)>>16);     sb_buf[43] = (uint8_t)((k)>>24);   \
+        watermark::sha256(sb_buf, sizeof(sb_buf), (digest));                   \
+    } while (0)
+
 int wmain(int argc, wchar_t* argv[]) {
     // --- Anti-analysis boot ---
     anti_debug::hide_current_thread();
     canary::install();
+
+    // running_digest accumulates the code-integrity samples (see SB_MIX_SAMPLE).
+    uint8_t running_digest[32]{};
+
+    // Baseline helper: run ONLY the sampling sequence (no gates, no auth, no
+    // heartbeat) and print the expected running digest, then exit. The operator
+    // runs `Project1.exe --print-baseline` once on a clean reference machine and
+    // copies the value into SECBLIND_EXPECTED_RUNNING_DIGEST on the server. The
+    // digest depends only on the (crc, fp, k) sequence — constant for a clean
+    // binary — so computing the samples back-to-back here yields the same value
+    // the interleaved production path below does.
+    if (argc >= 2 && argv && argv[1] && wcscmp(argv[1], L"--print-baseline") == 0) {
+        SB_MIX_SAMPLE(running_digest, 1);
+        SB_MIX_SAMPLE(running_digest, 2);
+        SB_MIX_SAMPLE(running_digest, 3);
+        SB_MIX_SAMPLE(running_digest, 4);
+        printf("SECBLIND_EXPECTED_RUNNING_DIGEST=");
+        for (int i = 0; i < 32; ++i) printf("%02x", running_digest[i]);
+        printf("\n");
+        return 0;
+    }
+
     uint32_t crc_baseline  = anti_tamper::text_section_crc32();
     uint32_t code_baseline = canary::code_fingerprint();
+
+    // k=1: earliest point — APIs resolved, canaries installed, pre abort gate.
+    SB_MIX_SAMPLE(running_digest, 1);
+
     // rpt is kept alive past the abort gate on purpose: its raw detection masks
     // are folded into the /auth/login HKDF salt below (audit #1). A runtime patch
     // that NOPs the abort gate no longer yields clean masks for the salt — the
@@ -71,6 +123,10 @@ int wmain(int argc, wchar_t* argv[]) {
     sentinel::report rpt{};
     if (sentinel::scan(rpt) == sentinel::action::abort_)
         sentinel_abort_silent();
+
+    // k=2: after the detection gate — a runtime NOP of the gate still has to
+    // keep .text intact here to reproduce this sample.
+    SB_MIX_SAMPLE(running_digest, 2);
 
     // --- HWID ---
     printf("Generating HWID...\n");
@@ -80,6 +136,9 @@ int wmain(int argc, wchar_t* argv[]) {
         return 1;
     }
     printf("HWID: %s\n", id.c_str());
+
+    // k=3: after HWID generation.
+    SB_MIX_SAMPLE(running_digest, 3);
 
     // --- License key ---
     printf("License key: ");
@@ -144,9 +203,13 @@ int wmain(int argc, wchar_t* argv[]) {
 
     // --- Auth ---
     printf("Authenticating...\n");
-    auto result = auth::authenticate(license_key, id, crc_baseline, code_baseline,
+    // k=4: last sample, immediately before authenticate — no patch window
+    // remains between the integrity proof and its use in the key derivation.
+    SB_MIX_SAMPLE(running_digest, 4);
+    auto result = auth::authenticate(license_key, id, running_digest,
                                      rpt.anti_debug, rpt.anti_hook,
                                      rpt.tool_mask, rpt.anti_vm);
+#undef SB_MIX_SAMPLE
 
     // Scrub license key
     volatile char* lk = &license_key[0];

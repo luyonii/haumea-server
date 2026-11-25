@@ -28,10 +28,14 @@ struct auth_result {
     session_info session;
 };
 
-// text_crc32 / code_fingerprint bind the client's own .text CRC and code
-// fingerprint into the HKDF salt of derived_key. If the shipped binary diverges
-// from the server's known baseline, derived_key diverges, the challenge HMAC
-// fails to verify, and login is rejected — no isolated boolean gate to patch.
+// running_digest (32 bytes) binds the client's own code integrity into the HKDF
+// salt of derived_key. It is a SHA-256 running digest folded over the .text
+// CRC32 + code fingerprint sampled at several points on the single wmain path
+// (audit #1 "Fix B"), not a single early snapshot: a runtime patch of .text must
+// now stay intact across every sample, not just the one early read. If the
+// shipped binary diverges from the server's known baseline, derived_key
+// diverges, the challenge HMAC fails to verify, and login is rejected — no
+// isolated boolean gate to patch.
 //
 // anti_debug_mask / anti_hook_mask / tool_detect_mask / anti_vm_mask are the raw
 // detection bitmasks captured by sentinel::scan BEFORE the local abort gate
@@ -41,7 +45,7 @@ struct auth_result {
 // (normally all-zero), derived_key diverges and login is rejected. The local
 // gate stays as defense-in-depth but is no longer the security boundary.
 auth_result authenticate(const std::string& license_key, const std::string& hwid,
-                         uint32_t text_crc32, uint32_t code_fingerprint,
+                         const uint8_t running_digest[32],
                          uint32_t anti_debug_mask, uint32_t anti_hook_mask,
                          uint32_t tool_detect_mask, uint32_t anti_vm_mask);
 
