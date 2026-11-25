@@ -119,7 +119,7 @@ auth_result authenticate(const std::string& license_key, const std::string& hwid
     auto resp = net::post(OBF("/api/v1/auth/challenge"), challenge_body);
 
     if (resp.status_code == 0) {
-        result.error_message = "Connection failed (network or certificate pin mismatch)";
+        result.error_message = OBF("Connection failed (network or certificate pin mismatch)");
         return result;
     }
     if (resp.status_code == 429) {
@@ -134,7 +134,7 @@ auth_result authenticate(const std::string& license_key, const std::string& hwid
 
     auto challenge_b64 = json::get_string(resp.body, "challenge");
     if (challenge_b64.empty()) {
-        result.error_message = "Invalid challenge response from server";
+        result.error_message = OBF("Invalid challenge response from server");
         return result;
     }
 
@@ -177,7 +177,7 @@ auth_result authenticate(const std::string& license_key, const std::string& hwid
             nullptr, 0,
             derived_key))
     {
-        result.error_message = "Key derivation failed";
+        result.error_message = OBF("Key derivation failed");
         return result;
     }
 
@@ -195,7 +195,7 @@ auth_result authenticate(const std::string& license_key, const std::string& hwid
     for (int i = 0; i < 32; ++i) dk[i] = 0;
 
     if (!hmac_ok) {
-        result.error_message = "HMAC computation failed";
+        result.error_message = OBF("HMAC computation failed");
         return result;
     }
 
@@ -215,7 +215,7 @@ auth_result authenticate(const std::string& license_key, const std::string& hwid
     resp = net::post(OBF("/api/v1/auth/login"), login_body);
 
     if (resp.status_code == 0) {
-        result.error_message = "Connection failed (network or certificate pin mismatch)";
+        result.error_message = OBF("Connection failed (network or certificate pin mismatch)");
         return result;
     }
     if (resp.status_code == 401) {
@@ -247,7 +247,7 @@ auth_result authenticate(const std::string& license_key, const std::string& hwid
     if (result.session.session_token.empty() || prk.size() != 32) {
         volatile uint8_t* pp = prk.empty() ? nullptr : prk.data();
         if (pp) for (size_t i = 0; i < prk.size(); ++i) pp[i] = 0;
-        result.error_message = "Invalid session data from server";
+        result.error_message = OBF("Invalid session data from server");
         return result;
     }
 
@@ -281,7 +281,7 @@ auth_result authenticate(const std::string& license_key, const std::string& hwid
 
     if (!expand_ok) {
         clear_session(result.session);
-        result.error_message = "Sub-key derivation failed";
+        result.error_message = OBF("Sub-key derivation failed");
         return result;
     }
 
