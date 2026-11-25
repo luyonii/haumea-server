@@ -65,6 +65,33 @@ is almost always flagged by AV.
 
 ---
 
+## Server bind baseline (audit #1/#10)
+
+Before deploying the server against a new client build, set **all six**
+`SECBLIND_EXPECTED_*` envs (the server fails closed at startup if any is empty).
+They are folded into the `/auth/login` HKDF salt; see SERVER_SPEC.md `/auth/login`.
+
+| env | value | source |
+|-----|-------|--------|
+| `SECBLIND_EXPECTED_TEXT_CRC32` | 8 hex | CRC32 of the shipped `.text` (final, post-pack) |
+| `SECBLIND_EXPECTED_CODE_FINGERPRINT` | ≤16 hex | client `canary::code_fingerprint()` of the shipped build |
+| `SECBLIND_EXPECTED_ANTI_DEBUG_MASK` | `00000000` | clean reference machine (no debugger) |
+| `SECBLIND_EXPECTED_ANTI_HOOK_MASK` | `00000000` | clean reference machine (no API hooks) |
+| `SECBLIND_EXPECTED_TOOL_DETECT_MASK` | `00000000` | clean reference machine (no analysis tools) |
+| `SECBLIND_EXPECTED_ANTI_VM_MASK` | `00000000` | bare-metal reference machine |
+
+The four detection masks are **zero on a legitimate machine**, so the operator
+normally sets them to `00000000` — no extraction step is required for them.
+
+> Note: `SECBLIND_EXPECTED_ANTI_VM_MASK = 00000000` means a client running under
+> a hypervisor (non-zero `anti_vm`) derives a different key and is **rejected at
+> login**, not merely flagged. If virtualised customers must be supported, this
+> binding needs rethinking (it conflicts with the anti_vm=WARN telemetry policy).
+> See the audit #1 Fix B / anti_vm follow-up.
+
+The crc / fingerprint baseline extraction (and the planned interleaved
+multi-sample running digest, audit #1 Fix B) is tracked separately.
+
 ## Reproducibility
 
 - Pin the exact VMProtect and Themida versions in CI.

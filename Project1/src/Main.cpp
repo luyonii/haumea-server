@@ -64,11 +64,13 @@ int wmain(int argc, wchar_t* argv[]) {
     canary::install();
     uint32_t crc_baseline  = anti_tamper::text_section_crc32();
     uint32_t code_baseline = canary::code_fingerprint();
-    {
-        sentinel::report rpt{};
-        if (sentinel::scan(rpt) == sentinel::action::abort_)
-            sentinel_abort_silent();
-    }
+    // rpt is kept alive past the abort gate on purpose: its raw detection masks
+    // are folded into the /auth/login HKDF salt below (audit #1). A runtime patch
+    // that NOPs the abort gate no longer yields clean masks for the salt — the
+    // attacker would also have to zero rpt before authenticate() runs.
+    sentinel::report rpt{};
+    if (sentinel::scan(rpt) == sentinel::action::abort_)
+        sentinel_abort_silent();
 
     // --- HWID ---
     printf("Generating HWID...\n");
@@ -142,7 +144,9 @@ int wmain(int argc, wchar_t* argv[]) {
 
     // --- Auth ---
     printf("Authenticating...\n");
-    auto result = auth::authenticate(license_key, id, crc_baseline, code_baseline);
+    auto result = auth::authenticate(license_key, id, crc_baseline, code_baseline,
+                                     rpt.anti_debug, rpt.anti_hook,
+                                     rpt.tool_mask, rpt.anti_vm);
 
     // Scrub license key
     volatile char* lk = &license_key[0];

@@ -44,30 +44,45 @@ Request a time-limited nonce before login.
 Authenticate with activation code + device fingerprint id + solved nonce.
 
 The `challenge_response` field is `HMAC-SHA256(nonce, derived_key)` where  
-`derived_key = HKDF-SHA256(ikm=license_key, salt=hwid_hex_bytes || "SecBlind_HKDF_v1" || LE32(text_crc32) || LE64(code_fingerprint), info=<empty>)`.
+`derived_key = HKDF-SHA256(ikm=license_key, salt=hwid_hex_bytes || "SecBlind_HKDF_v1" || LE32(text_crc32) || LE64(code_fingerprint) || LE32(anti_debug) || LE32(anti_hook) || LE32(tool_detect) || LE32(anti_vm), info=<empty>)`.
 
-Salt layout (92 bytes):
+Salt layout (108 bytes):
 
 | bytes | field |
 |-------|-------|
-| 0..63  | HWID hex (64 ASCII) |
-| 64..79 | fixed literal `"SecBlind_HKDF_v1"` (16 bytes) |
-| 80..83 | `LE32(text_crc32)` — CRC32 of the client's own `.text` section |
-| 84..91 | `LE64(code_fingerprint)` — client code fingerprint (uint32, zero-extended) |
+| 0..63   | HWID hex (64 ASCII) |
+| 64..79  | fixed literal `"SecBlind_HKDF_v1"` (16 bytes) |
+| 80..83  | `LE32(text_crc32)` — CRC32 of the client's own `.text` section |
+| 84..91  | `LE64(code_fingerprint)` — client code fingerprint (uint32, zero-extended) |
+| 92..95  | `LE32(anti_debug_mask)` — raw `anti_debug::check_all()` bitmask at boot |
+| 96..99  | `LE32(anti_hook_mask)` — raw `anti_hook::check_critical_apis()` bitmask at boot |
+| 100..103| `LE32(tool_detect_mask)` — raw `tool_detect::enumerate()` bitmask at boot |
+| 104..107| `LE32(anti_vm_mask)` — raw `anti_vm::check_all()` bitmask at boot |
 
 `info` empty. There is no per-license `session_salt`.
 
-**Binary-integrity binding (audit #1/#10).** The last 12 bytes bind the client's
-own code integrity into `derived_key`. The server computes the same salt using
-two startup envs, both **required** (empty → fatal, fail-closed):
+**Binary-integrity + detection binding (audit #1/#10).** The last 28 bytes bind
+the client's code integrity AND its four anti-analysis detection masks into
+`derived_key`. The masks are the raw bitmasks captured by `sentinel::scan` at
+boot, *before* the local abort gate — so a runtime patch that NOPs the gate no
+longer yields clean masks for the salt. The server computes the same salt using
+six startup envs, all **required** (empty → fatal, fail-closed):
 
 - `SECBLIND_EXPECTED_TEXT_CRC32` — 8 hex chars, the expected `.text` CRC32.
 - `SECBLIND_EXPECTED_CODE_FINGERPRINT` — up to 16 hex chars, the expected code fingerprint.
+- `SECBLIND_EXPECTED_ANTI_DEBUG_MASK` — 8 hex chars; `00000000` on a clean reference machine.
+- `SECBLIND_EXPECTED_ANTI_HOOK_MASK` — 8 hex chars; `00000000` on a clean reference machine.
+- `SECBLIND_EXPECTED_TOOL_DETECT_MASK` — 8 hex chars; `00000000` on a clean reference machine.
+- `SECBLIND_EXPECTED_ANTI_VM_MASK` — 8 hex chars; `00000000` on bare metal.
 
 If the shipped client binary diverges from this baseline (modification, wrong
-version, tamper), its `derived_key` diverges, the challenge HMAC fails to
-verify, and `/auth/login` returns `401 invalid_credentials`. There is no
-isolated boolean on the client to patch out.
+version, tamper) *or* runs in a detected environment (debugger, API hook,
+analysis tool, VM) so that any mask is non-zero, its `derived_key` diverges, the
+challenge HMAC fails to verify, and `/auth/login` returns `401
+invalid_credentials`. There is no isolated boolean on the client to patch out.
+(Defense-in-depth limit: a runtime attacker who also forces every mask back to
+the expected baseline before `authenticate()` runs still derives the right key —
+see the multi-sampling follow-up, audit #1 Fix B.)
 
 ### Request
 

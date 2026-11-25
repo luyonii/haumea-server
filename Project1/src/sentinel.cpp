@@ -46,6 +46,16 @@ static uint32_t s_code_baseline  = 0;
 static std::atomic<bool> s_running{false};
 static scrub_cb s_scrub_cb = nullptr;
 
+// Record-of-record: the raw detection masks captured by the FIRST scan(), at
+// process boot, before the local abort gate. These are the values folded into
+// the /auth/login HKDF salt (audit #1). The monitor ORs them into every trip
+// report so that a runtime patch which neutralises the live check functions
+// (returning 0 on re-call) still carries the boot-time detection to the server.
+static std::atomic<uint32_t> s_scan_anti_debug{0};
+static std::atomic<uint32_t> s_scan_anti_hook{0};
+static std::atomic<uint32_t> s_scan_tool_mask{0};
+static std::atomic<uint32_t> s_scan_anti_vm{0};
+
 void set_scrub_callback(scrub_cb cb) { s_scrub_cb = cb; }
 
 namespace detail {
@@ -81,6 +91,14 @@ action scan(report& out) {
     out.anti_hook       = anti_hook::check_critical_apis();
     out.tool_mask       = tool_detect::enumerate();
     // tamper_detected is filled by the monitor, not by initial scan.
+
+    // Persist the boot-time masks BEFORE the abort gate below, so they survive
+    // for the HKDF salt (auth) and the heartbeat telemetry (monitor), whether or
+    // not this scan aborts. OR-set: never lose a bit seen on an earlier scan.
+    s_scan_anti_debug.fetch_or(out.anti_debug, std::memory_order_relaxed);
+    s_scan_anti_hook.fetch_or(out.anti_hook,   std::memory_order_relaxed);
+    s_scan_tool_mask.fetch_or(out.tool_mask,   std::memory_order_relaxed);
+    s_scan_anti_vm.fetch_or(out.anti_vm,       std::memory_order_relaxed);
 
     if (out.anti_debug || out.anti_hook || out.tool_mask)
         return action::abort_;

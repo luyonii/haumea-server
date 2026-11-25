@@ -32,8 +32,18 @@ struct auth_result {
 // fingerprint into the HKDF salt of derived_key. If the shipped binary diverges
 // from the server's known baseline, derived_key diverges, the challenge HMAC
 // fails to verify, and login is rejected — no isolated boolean gate to patch.
+//
+// anti_debug_mask / anti_hook_mask / tool_detect_mask / anti_vm_mask are the raw
+// detection bitmasks captured by sentinel::scan BEFORE the local abort gate
+// (audit #1). They are folded into the same salt so a runtime bypass of the
+// local gate (NOP the jne / zero the registers) is no longer sufficient: unless
+// the attacker also forces every mask back to the server's expected baseline
+// (normally all-zero), derived_key diverges and login is rejected. The local
+// gate stays as defense-in-depth but is no longer the security boundary.
 auth_result authenticate(const std::string& license_key, const std::string& hwid,
-                         uint32_t text_crc32, uint32_t code_fingerprint);
+                         uint32_t text_crc32, uint32_t code_fingerprint,
+                         uint32_t anti_debug_mask, uint32_t anti_hook_mask,
+                         uint32_t tool_detect_mask, uint32_t anti_vm_mask);
 
 // Zeros session_key and clears all fields.
 void clear_session(session_info& info);

@@ -98,12 +98,30 @@ func resolveSecret(field, v string) ([]byte, error) {
 	return hex.DecodeString(s)
 }
 
-// buildBinaryBindSalt turns the two expected-binary-integrity env values into
-// the 12-byte salt suffix LE32(text_crc32) || LE64(code_fingerprint). Both are
-// required: an empty value is a hard startup error (fail closed), matching the
-// secret-resolution policy. crcHex is 8 hex chars (uint32); fpHex is up to 16
-// hex chars (uint64, the uint32 client fingerprint zero-extended).
-func buildBinaryBindSalt(crcHex, fpHex string) ([]byte, error) {
+// parseMaskEnv parses one 8-hex-char uint32 detection-mask env. Required:
+// empty is a hard startup error (fail closed). On a legitimate reference
+// machine every mask is 0, so the operator normally sets all four to 00000000.
+func parseMaskEnv(name, v string) (uint32, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0, fmt.Errorf("%s is unset or empty", name)
+	}
+	m, err := strconv.ParseUint(v, 16, 32)
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", name, err)
+	}
+	return uint32(m), nil
+}
+
+// buildBinaryBindSalt turns the expected-binary-integrity env values into the
+// 28-byte salt suffix:
+//   LE32(text_crc32) || LE64(code_fingerprint)
+//   || LE32(anti_debug) || LE32(anti_hook) || LE32(tool_detect) || LE32(anti_vm)
+// All are required: an empty value is a hard startup error (fail closed),
+// matching the secret-resolution policy. crcHex is 8 hex chars (uint32); fpHex
+// is up to 16 hex chars (uint64, the uint32 client fingerprint zero-extended);
+// adHex/ahHex/tdHex/avHex are each 8 hex chars (uint32), normally 00000000.
+func buildBinaryBindSalt(crcHex, fpHex, adHex, ahHex, tdHex, avHex string) ([]byte, error) {
 	crcHex = strings.TrimSpace(crcHex)
 	fpHex = strings.TrimSpace(fpHex)
 	if crcHex == "" {
@@ -120,9 +138,29 @@ func buildBinaryBindSalt(crcHex, fpHex string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("SECBLIND_EXPECTED_CODE_FINGERPRINT: %w", err)
 	}
-	b := make([]byte, 12)
+	ad, err := parseMaskEnv("SECBLIND_EXPECTED_ANTI_DEBUG_MASK", adHex)
+	if err != nil {
+		return nil, err
+	}
+	ah, err := parseMaskEnv("SECBLIND_EXPECTED_ANTI_HOOK_MASK", ahHex)
+	if err != nil {
+		return nil, err
+	}
+	td, err := parseMaskEnv("SECBLIND_EXPECTED_TOOL_DETECT_MASK", tdHex)
+	if err != nil {
+		return nil, err
+	}
+	av, err := parseMaskEnv("SECBLIND_EXPECTED_ANTI_VM_MASK", avHex)
+	if err != nil {
+		return nil, err
+	}
+	b := make([]byte, 28)
 	binary.LittleEndian.PutUint32(b[0:4], uint32(crc))
 	binary.LittleEndian.PutUint64(b[4:12], fp)
+	binary.LittleEndian.PutUint32(b[12:16], ad)
+	binary.LittleEndian.PutUint32(b[16:20], ah)
+	binary.LittleEndian.PutUint32(b[20:24], td)
+	binary.LittleEndian.PutUint32(b[24:28], av)
 	return b, nil
 }
 
@@ -185,13 +223,18 @@ func main() {
 		logger.Fatal("master_secret must be hex of at least 32 bytes")
 	}
 
-	// Binary-integrity binding (audit items #1/#10). The expected .text CRC32
-	// and code fingerprint of the shipped client are folded into the /auth/login
-	// HKDF salt. Fail closed: both must be present at startup, or a mismatched
-	// client could still authenticate.
+	// Binary-integrity + detection binding (audit item #1/#10). The expected
+	// .text CRC32, code fingerprint, and the four anti-analysis detection masks
+	// of the shipped client are folded into the /auth/login HKDF salt. Fail
+	// closed: all six must be present at startup, or a mismatched / detected
+	// client could still authenticate. On a legit machine the masks are all zero.
 	bindSalt, err := buildBinaryBindSalt(
 		os.Getenv("SECBLIND_EXPECTED_TEXT_CRC32"),
-		os.Getenv("SECBLIND_EXPECTED_CODE_FINGERPRINT"))
+		os.Getenv("SECBLIND_EXPECTED_CODE_FINGERPRINT"),
+		os.Getenv("SECBLIND_EXPECTED_ANTI_DEBUG_MASK"),
+		os.Getenv("SECBLIND_EXPECTED_ANTI_HOOK_MASK"),
+		os.Getenv("SECBLIND_EXPECTED_TOOL_DETECT_MASK"),
+		os.Getenv("SECBLIND_EXPECTED_ANTI_VM_MASK"))
 	if err != nil {
 		logger.Fatalf("binary bind: %v", err)
 	}

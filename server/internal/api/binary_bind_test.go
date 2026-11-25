@@ -17,13 +17,18 @@ import (
 	"github.com/secblind/server/pkg/crypto"
 )
 
-// bindSalt12 builds the LE32(crc)||LE64(fp) suffix the client appends to the
-// /auth/login HKDF salt. Mirrors buildBinaryBindSalt in cmd/server/main.go and
-// the C++ client (auth.cpp).
-func bindSalt12(crc uint32, fp uint64) []byte {
-	b := make([]byte, 12)
+// bindSalt28 builds the
+//   LE32(crc)||LE64(fp)||LE32(anti_debug)||LE32(anti_hook)||LE32(tool_detect)||LE32(anti_vm)
+// suffix the client appends to the /auth/login HKDF salt. Mirrors
+// buildBinaryBindSalt in cmd/server/main.go and the C++ client (auth.cpp).
+func bindSalt28(crc uint32, fp uint64, ad, ah, td, av uint32) []byte {
+	b := make([]byte, 28)
 	binary.LittleEndian.PutUint32(b[0:4], crc)
 	binary.LittleEndian.PutUint64(b[4:12], fp)
+	binary.LittleEndian.PutUint32(b[12:16], ad)
+	binary.LittleEndian.PutUint32(b[16:20], ah)
+	binary.LittleEndian.PutUint32(b[20:24], td)
+	binary.LittleEndian.PutUint32(b[24:28], av)
 	return b
 }
 
@@ -37,23 +42,34 @@ func loginMAC(licenseKey, hwid string, nonce, bind []byte) []byte {
 }
 
 // TestBinaryBind_WrongCRCDivergesKey is a pure unit test (no PG/Redis): it
-// proves that a one-bit change in the expected .text CRC32 makes the derived
-// key — and therefore the challenge_response the server verifies — diverge, so
-// a mismatched binary cannot produce an accepted MAC.
+// proves that a one-bit change in ANY bound field — the .text CRC32, the code
+// fingerprint, or any of the four anti-analysis detection masks — makes the
+// derived key, and therefore the challenge_response the server verifies,
+// diverge. So a mismatched binary OR a client running in a detected environment
+// (non-zero mask) cannot produce an accepted MAC (audit #1/#10).
 func TestBinaryBind_WrongCRCDivergesKey(t *testing.T) {
 	hwid := strings.Repeat("ab", 32)
 	nonce, _ := crypto.RandBytes(32)
 
-	good := bindSalt12(0x11223344, 0xAABBCCDD)
-	badCRC := bindSalt12(0x11223345, 0xAABBCCDD) // CRC off by one
-	badFP := bindSalt12(0x11223344, 0xAABBCCDE)  // fingerprint off by one
-
+	// Baseline reference machine: clean binary, all four masks zero.
+	good := bindSalt28(0x11223344, 0xAABBCCDD, 0, 0, 0, 0)
 	expected := loginMAC("LICENSE-KEY-TEST", hwid, nonce, good)
-	if crypto.Equal(loginMAC("LICENSE-KEY-TEST", hwid, nonce, badCRC), expected) {
-		t.Fatal("wrong text_crc32 produced an accepted MAC")
+
+	cases := []struct {
+		name string
+		bind []byte
+	}{
+		{"text_crc32", bindSalt28(0x11223345, 0xAABBCCDD, 0, 0, 0, 0)},
+		{"code_fingerprint", bindSalt28(0x11223344, 0xAABBCCDE, 0, 0, 0, 0)},
+		{"anti_debug_mask", bindSalt28(0x11223344, 0xAABBCCDD, 1, 0, 0, 0)},
+		{"anti_hook_mask", bindSalt28(0x11223344, 0xAABBCCDD, 0, 1, 0, 0)},
+		{"tool_detect_mask", bindSalt28(0x11223344, 0xAABBCCDD, 0, 0, 1, 0)},
+		{"anti_vm_mask", bindSalt28(0x11223344, 0xAABBCCDD, 0, 0, 0, 1)},
 	}
-	if crypto.Equal(loginMAC("LICENSE-KEY-TEST", hwid, nonce, badFP), expected) {
-		t.Fatal("wrong code_fingerprint produced an accepted MAC")
+	for _, c := range cases {
+		if crypto.Equal(loginMAC("LICENSE-KEY-TEST", hwid, nonce, c.bind), expected) {
+			t.Fatalf("divergent %s produced an accepted MAC", c.name)
+		}
 	}
 	// Sanity: identical bind reproduces the same MAC.
 	if !crypto.Equal(loginMAC("LICENSE-KEY-TEST", hwid, nonce, good), expected) {
@@ -87,7 +103,7 @@ func TestLogin_WrongBinaryBindRejected(t *testing.T) {
 		SessionTTL:     15 * time.Minute,
 		HWIDCooldown:   30 * 24 * time.Hour,
 		RatePerIP:      100000, RatePerHWID: 100000,
-		BinaryBindSalt: bindSalt12(crc, fp),
+		BinaryBindSalt: bindSalt28(crc, fp, 0, 0, 0, 0),
 	}}
 
 	key := "bind-test-" + strconv.FormatInt(time.Now().UnixNano(), 36)
@@ -116,10 +132,14 @@ func TestLogin_WrongBinaryBindRejected(t *testing.T) {
 		return w.Code
 	}
 
-	if code := call(strings.Repeat("ab", 32), bindSalt12(crc, fp)); code != http.StatusOK {
+	if code := call(strings.Repeat("ab", 32), bindSalt28(crc, fp, 0, 0, 0, 0)); code != http.StatusOK {
 		t.Fatalf("matching bind: status=%d want 200", code)
 	}
-	if code := call(strings.Repeat("cd", 32), bindSalt12(crc+1, fp)); code != http.StatusUnauthorized {
+	if code := call(strings.Repeat("cd", 32), bindSalt28(crc+1, fp, 0, 0, 0, 0)); code != http.StatusUnauthorized {
 		t.Fatalf("wrong crc: status=%d want 401", code)
+	}
+	// A detected environment (non-zero anti_debug mask) must also be rejected.
+	if code := call(strings.Repeat("ef", 32), bindSalt28(crc, fp, 1, 0, 0, 0)); code != http.StatusUnauthorized {
+		t.Fatalf("detected env (anti_debug mask): status=%d want 401", code)
 	}
 }
