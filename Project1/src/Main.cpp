@@ -33,9 +33,21 @@ void scrub_payload_key() {
 }
 
 [[noreturn]] static void sentinel_abort_silent() {
+    // Flush stdio + OS buffers so any diagnostic printed before the abort is
+    // not lost when stdout/stderr is a pipe or redirect (audit item #9).
+    fflush(stdout);
+    fflush(stderr);
+    using fn_GSH = HANDLE(WINAPI*)(DWORD);
+    using fn_FFB = BOOL(WINAPI*)(HANDLE);
     using fn_TP = BOOL(WINAPI*)(HANDLE, UINT);
     using fn_EP = void(WINAPI*)(UINT);
     auto k32 = dynapi::get_module(dynapi::modules::KERNEL32);
+    auto pGSH = reinterpret_cast<fn_GSH>(dynapi::resolve(k32, API_HASH("GetStdHandle")));
+    auto pFFB = reinterpret_cast<fn_FFB>(dynapi::resolve(k32, API_HASH("FlushFileBuffers")));
+    if (pGSH && pFFB) {
+        pFFB(pGSH(static_cast<DWORD>(-11))); // STD_OUTPUT_HANDLE
+        pFFB(pGSH(static_cast<DWORD>(-12))); // STD_ERROR_HANDLE
+    }
     auto pTP = reinterpret_cast<fn_TP>(dynapi::resolve(k32, API_HASH("TerminateProcess")));
     if (pTP) pTP(reinterpret_cast<HANDLE>(-1), 0);
     auto pEP = reinterpret_cast<fn_EP>(dynapi::resolve(k32, API_HASH("ExitProcess")));

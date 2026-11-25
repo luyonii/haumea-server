@@ -10,8 +10,26 @@
 
 #include <Windows.h>
 #include <atomic>
+#include <cstdio>
 
 namespace sentinel {
+
+// Flush CRT stdio and the underlying OS buffers before an abort so diagnostics
+// written with printf survive when stdout/stderr are a pipe or a redirect to a
+// file (audit item #9). Resolved via dynapi to keep the zero-IAT property.
+static void flush_std_buffers() {
+    std::fflush(stdout);
+    std::fflush(stderr);
+    using fn_GSH = HANDLE(WINAPI*)(DWORD);
+    using fn_FFB = BOOL(WINAPI*)(HANDLE);
+    auto k32 = dynapi::get_module(dynapi::modules::KERNEL32);
+    auto pGSH = reinterpret_cast<fn_GSH>(dynapi::resolve(k32, API_HASH("GetStdHandle")));
+    auto pFFB = reinterpret_cast<fn_FFB>(dynapi::resolve(k32, API_HASH("FlushFileBuffers")));
+    if (pGSH && pFFB) {
+        pFFB(pGSH(static_cast<DWORD>(-11))); // STD_OUTPUT_HANDLE
+        pFFB(pGSH(static_cast<DWORD>(-12))); // STD_ERROR_HANDLE
+    }
+}
 
 using fn_CreateEventA  = HANDLE(WINAPI*)(LPSECURITY_ATTRIBUTES, BOOL, BOOL, LPCSTR);
 using fn_SetEvent      = BOOL(WINAPI*)(HANDLE);
@@ -47,6 +65,7 @@ uint32_t compose_sentinel_mask(uint32_t anti_debug_bits,
 } // namespace detail
 
 static void terminate_silent() {
+    flush_std_buffers();
     using fn_TP = BOOL (WINAPI*)(HANDLE, UINT);
     using fn_EP = VOID (WINAPI*)(UINT);
     auto pTP = reinterpret_cast<fn_TP>(dynapi::resolve(dynapi::modules::KERNEL32, API_HASH("TerminateProcess")));
