@@ -6,12 +6,14 @@ package main
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -96,6 +98,34 @@ func resolveSecret(field, v string) ([]byte, error) {
 	return hex.DecodeString(s)
 }
 
+// buildBinaryBindSalt turns the two expected-binary-integrity env values into
+// the 12-byte salt suffix LE32(text_crc32) || LE64(code_fingerprint). Both are
+// required: an empty value is a hard startup error (fail closed), matching the
+// secret-resolution policy. crcHex is 8 hex chars (uint32); fpHex is up to 16
+// hex chars (uint64, the uint32 client fingerprint zero-extended).
+func buildBinaryBindSalt(crcHex, fpHex string) ([]byte, error) {
+	crcHex = strings.TrimSpace(crcHex)
+	fpHex = strings.TrimSpace(fpHex)
+	if crcHex == "" {
+		return nil, fmt.Errorf("SECBLIND_EXPECTED_TEXT_CRC32 is unset or empty")
+	}
+	if fpHex == "" {
+		return nil, fmt.Errorf("SECBLIND_EXPECTED_CODE_FINGERPRINT is unset or empty")
+	}
+	crc, err := strconv.ParseUint(crcHex, 16, 32)
+	if err != nil {
+		return nil, fmt.Errorf("SECBLIND_EXPECTED_TEXT_CRC32: %w", err)
+	}
+	fp, err := strconv.ParseUint(fpHex, 16, 64)
+	if err != nil {
+		return nil, fmt.Errorf("SECBLIND_EXPECTED_CODE_FINGERPRINT: %w", err)
+	}
+	b := make([]byte, 12)
+	binary.LittleEndian.PutUint32(b[0:4], uint32(crc))
+	binary.LittleEndian.PutUint64(b[4:12], fp)
+	return b, nil
+}
+
 func toRouteLimits(in map[string]rateRoute) api.RouteLimits {
 	out := api.RouteLimits{}
 	for k, v := range in {
@@ -155,6 +185,17 @@ func main() {
 		logger.Fatal("master_secret must be hex of at least 32 bytes")
 	}
 
+	// Binary-integrity binding (audit items #1/#10). The expected .text CRC32
+	// and code fingerprint of the shipped client are folded into the /auth/login
+	// HKDF salt. Fail closed: both must be present at startup, or a mismatched
+	// client could still authenticate.
+	bindSalt, err := buildBinaryBindSalt(
+		os.Getenv("SECBLIND_EXPECTED_TEXT_CRC32"),
+		os.Getenv("SECBLIND_EXPECTED_CODE_FINGERPRINT"))
+	if err != nil {
+		logger.Fatalf("binary bind: %v", err)
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -175,6 +216,7 @@ func main() {
 
 	apiCfg := api.Config{
 		MasterSecret:      master,
+		BinaryBindSalt:    bindSalt,
 		SessionTTL:        time.Duration(cfg.SessionTTLS) * time.Second,
 		HeartbeatInterval: cfg.HeartbeatS,
 		HWIDCooldown:      time.Duration(cfg.HWIDCooldownD) * 24 * time.Hour,

@@ -28,7 +28,12 @@ struct auth_result {
     session_info session;
 };
 
-auth_result authenticate(const std::string& license_key, const std::string& hwid);
+// text_crc32 / code_fingerprint bind the client's own .text CRC and code
+// fingerprint into the HKDF salt of derived_key. If the shipped binary diverges
+// from the server's known baseline, derived_key diverges, the challenge HMAC
+// fails to verify, and login is rejected — no isolated boolean gate to patch.
+auth_result authenticate(const std::string& license_key, const std::string& hwid,
+                         uint32_t text_crc32, uint32_t code_fingerprint);
 
 // Zeros session_key and clears all fields.
 void clear_session(session_info& info);

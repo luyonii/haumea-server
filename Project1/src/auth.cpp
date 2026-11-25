@@ -108,7 +108,8 @@ static bool hkdf_sha256(const uint8_t* ikm,  size_t ikm_len,
 
 // ---- Public API ----
 
-auth_result authenticate(const std::string& license_key, const std::string& hwid) {
+auth_result authenticate(const std::string& license_key, const std::string& hwid,
+                         uint32_t text_crc32, uint32_t code_fingerprint) {
     auth_result result{};
 
     // --- Step 1: request challenge ---
@@ -138,14 +139,25 @@ auth_result authenticate(const std::string& license_key, const std::string& hwid
     // --- Step 2: derive key + compute challenge response ---
     auto nonce = base64::decode(challenge_b64);
 
-    // salt = hwid_bytes || fixed session salt
+    // salt = hwid_bytes || "SecBlind_HKDF_v1" || LE32(text_crc32) || LE64(code_fingerprint)
+    // The trailing 12 bytes bind the client's own code integrity into the key:
+    // a divergent binary derives a different key and the server rejects login.
     auto salt_fixed = OBF("SecBlind_HKDF_v1");
     std::vector<uint8_t> salt;
     salt.insert(salt.end(), hwid.begin(), hwid.end());
     salt.insert(salt.end(), salt_fixed.c_str(),
                 salt_fixed.c_str() + salt_fixed.size());
+    uint8_t bind[12];
+    bind[0] = static_cast<uint8_t>(text_crc32);
+    bind[1] = static_cast<uint8_t>(text_crc32 >> 8);
+    bind[2] = static_cast<uint8_t>(text_crc32 >> 16);
+    bind[3] = static_cast<uint8_t>(text_crc32 >> 24);
+    uint64_t fp64 = code_fingerprint; // zero-extend uint32 -> LE64
+    for (int i = 0; i < 8; ++i)
+        bind[4 + i] = static_cast<uint8_t>(fp64 >> (8 * i));
+    salt.insert(salt.end(), bind, bind + 12);
 
-    // derived_key = HKDF-SHA256(IKM=license_key, salt=hwid||fixed_salt)
+    // derived_key = HKDF-SHA256(IKM=license_key, salt=hwid||fixed||LE32(crc)||LE64(fp))
     uint8_t derived_key[32]{};
     if (!hkdf_sha256(
             reinterpret_cast<const uint8_t*>(license_key.data()), license_key.size(),

@@ -35,6 +35,14 @@ var (
 
 type Config struct {
 	MasterSecret      []byte // 32+ bytes
+	// BinaryBindSalt is appended to the /auth/login HKDF salt after hwid and the
+	// fixed "SecBlind_HKDF_v1" literal. It is LE32(expected_text_crc32) ||
+	// LE64(expected_code_fingerprint) = exactly 12 bytes, built from the
+	// SECBLIND_EXPECTED_TEXT_CRC32 / SECBLIND_EXPECTED_CODE_FINGERPRINT envs at
+	// startup (fail-closed if unset). A client whose binary diverges from this
+	// baseline derives a different key and fails the challenge HMAC. Nil in unit
+	// tests that do not exercise the binding (append of nil is a no-op).
+	BinaryBindSalt    []byte
 	SessionTTL        time.Duration
 	HeartbeatInterval int
 	HWIDCooldown      time.Duration
@@ -367,9 +375,10 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// so the unknown_license path pays the same crypto cost as the full path.
 	// expected is sunk via authSink below on every unknown path to keep the
 	// compiler from eliding the work.
-	salt := make([]byte, 0, len(req.HWID)+len(crypto.HKDFSalt))
+	salt := make([]byte, 0, len(req.HWID)+len(crypto.HKDFSalt)+len(s.Cfg.BinaryBindSalt))
 	salt = append(salt, []byte(req.HWID)...)
 	salt = append(salt, crypto.HKDFSalt...)
+	salt = append(salt, s.Cfg.BinaryBindSalt...) // LE32(text_crc32)||LE64(code_fingerprint)
 	derived, err := crypto.HKDF([]byte(req.LicenseKey), salt, nil, 32)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "server_error", "hkdf")

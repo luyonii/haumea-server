@@ -44,8 +44,30 @@ Request a time-limited nonce before login.
 Authenticate with activation code + device fingerprint id + solved nonce.
 
 The `challenge_response` field is `HMAC-SHA256(nonce, derived_key)` where  
-`derived_key = HKDF-SHA256(ikm=license_key, salt=hwid_hex_bytes || "SecBlind_HKDF_v1", info=<empty>)`.
-Salt is the HWID hex (64 ASCII bytes) concatenated to the fixed literal `"SecBlind_HKDF_v1"` (16 bytes). `info` empty. There is no per-license `session_salt`.
+`derived_key = HKDF-SHA256(ikm=license_key, salt=hwid_hex_bytes || "SecBlind_HKDF_v1" || LE32(text_crc32) || LE64(code_fingerprint), info=<empty>)`.
+
+Salt layout (92 bytes):
+
+| bytes | field |
+|-------|-------|
+| 0..63  | HWID hex (64 ASCII) |
+| 64..79 | fixed literal `"SecBlind_HKDF_v1"` (16 bytes) |
+| 80..83 | `LE32(text_crc32)` — CRC32 of the client's own `.text` section |
+| 84..91 | `LE64(code_fingerprint)` — client code fingerprint (uint32, zero-extended) |
+
+`info` empty. There is no per-license `session_salt`.
+
+**Binary-integrity binding (audit #1/#10).** The last 12 bytes bind the client's
+own code integrity into `derived_key`. The server computes the same salt using
+two startup envs, both **required** (empty → fatal, fail-closed):
+
+- `SECBLIND_EXPECTED_TEXT_CRC32` — 8 hex chars, the expected `.text` CRC32.
+- `SECBLIND_EXPECTED_CODE_FINGERPRINT` — up to 16 hex chars, the expected code fingerprint.
+
+If the shipped client binary diverges from this baseline (modification, wrong
+version, tamper), its `derived_key` diverges, the challenge HMAC fails to
+verify, and `/auth/login` returns `401 invalid_credentials`. There is no
+isolated boolean on the client to patch out.
 
 ### Request
 

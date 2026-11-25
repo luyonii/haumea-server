@@ -142,7 +142,7 @@ int wmain(int argc, wchar_t* argv[]) {
 
     // --- Auth ---
     printf("Authenticating...\n");
-    auto result = auth::authenticate(license_key, id);
+    auto result = auth::authenticate(license_key, id, crc_baseline, code_baseline);
 
     // Scrub license key
     volatile char* lk = &license_key[0];
