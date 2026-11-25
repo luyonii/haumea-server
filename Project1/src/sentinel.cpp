@@ -135,12 +135,20 @@ static DWORD WINAPI monitor_proc(LPVOID) {
 
             // No short-circuit: every check runs so the server receives the
             // full trip fingerprint, not just the first bit that fired.
-            uint32_t ad_bits = anti_debug::check_all();
-            uint32_t ah_bits = anti_hook::check_critical_apis();
+            // OR in the boot-time scan masks (record-of-record): if an attacker
+            // patched these check functions to return 0 AFTER the boot scan, the
+            // live re-call reports clean but the persisted boot value still trips
+            // (audit #1 — CRITICAL detection must have a server-side consequence
+            // even when the local check is neutralised).
+            uint32_t ad_bits = anti_debug::check_all()
+                             | s_scan_anti_debug.load(std::memory_order_relaxed);
+            uint32_t ah_bits = anti_hook::check_critical_apis()
+                             | s_scan_anti_hook.load(std::memory_order_relaxed);
             bool tamper_fail = !anti_tamper::verify(s_baseline);
             bool cdata_fail  = !canary::verify_data();
             bool ccode_fail  = !canary::verify_code(s_code_baseline);
-            uint32_t tm      = tool_detect::enumerate();
+            uint32_t tm      = tool_detect::enumerate()
+                             | s_scan_tool_mask.load(std::memory_order_relaxed);
 
             uint32_t sMask = detail::compose_sentinel_mask(
                 ad_bits, ah_bits, tamper_fail, cdata_fail, ccode_fail,
@@ -150,7 +158,8 @@ static DWORD WINAPI monitor_proc(LPVOID) {
             // anti_vm is WARN (audit item #7): fold its bits into the heartbeat
             // telemetry so the server sees them, but do NOT trip/terminate and
             // do NOT let them influence the server ban (server masks them out).
-            uint32_t av_warn = (anti_vm::check_all() & 0x1Fu)
+            uint32_t av_warn = ((anti_vm::check_all()
+                                 | s_scan_anti_vm.load(std::memory_order_relaxed)) & 0x1Fu)
                                << sentinel::bits::WARN_ANTIVM_SHIFT;
             if (av_warn)
                 heartbeat::report_trip(av_warn, 0);
