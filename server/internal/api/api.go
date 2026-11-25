@@ -587,11 +587,19 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Sentinel telemetry: a non-zero mask is a reported trip. Persist it, then
-	// auto-ban if this license crossed the 2-trips/24h threshold. The ban is
-	// the authoritative kill signal, so it takes priority over the normal
+	// Sentinel telemetry: a non-zero CRITICAL mask is a reported trip. Persist
+	// it, then auto-ban if this license crossed the 2-trips/24h threshold. The
+	// ban is the authoritative kill signal, so it takes priority over the normal
 	// kill/revoke path below.
-	if sMask != 0 || tMask != 0 {
+	//
+	// WARN bits (anti_vm region, see sentinel.h bits::WARN_ANTIVM_MASK) are
+	// telemetry only: a legitimately virtualised Windows must never be banned,
+	// so they are masked out of the trip decision. criticalS carries only the
+	// CRITICAL bits; the full sMask is still recorded in the abuse reason for
+	// visibility when a CRITICAL trip also carries WARN context.
+	const warnSentinelMask uint32 = 0x001F0000 // bits 16..20, anti_vm
+	criticalS := sMask &^ warnSentinelMask
+	if criticalS != 0 || tMask != 0 {
 		s.PG.LogAbuse(ctx, &sess.LicenseID, clientIP(r),
 			fmt.Sprintf("sentinel_trip:s=%d,t=%d", sMask, tMask))
 		banned, err := s.PG.AutoBanIfSentinelThreshold(ctx, sess.LicenseID, 2, 24*time.Hour)

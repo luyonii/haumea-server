@@ -129,6 +129,14 @@ static DWORD WINAPI monitor_proc(LPVOID) {
                 /*seh_fault=*/false);
             uint32_t tMask = tm;
 
+            // anti_vm is WARN (audit item #7): fold its bits into the heartbeat
+            // telemetry so the server sees them, but do NOT trip/terminate and
+            // do NOT let them influence the server ban (server masks them out).
+            uint32_t av_warn = (anti_vm::check_all() & 0x1Fu)
+                               << sentinel::bits::WARN_ANTIVM_SHIFT;
+            if (av_warn)
+                heartbeat::report_trip(av_warn, 0);
+
             if (sMask || tMask) {
                 trip_and_die(sMask, tMask);
                 break;

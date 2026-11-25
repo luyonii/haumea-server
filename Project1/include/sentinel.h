@@ -33,6 +33,16 @@ constexpr uint32_t TAMPER      = 0x80000000u;
 constexpr uint32_t CANARY_DATA = 0x40000000u;
 constexpr uint32_t CANARY_CODE = 0x20000000u;
 constexpr uint32_t SEH_FAULT   = 0x10000000u;
+
+// WARN region (audit item #7): anti_vm detections are reported to the server
+// as heartbeat telemetry but are NEVER a local trip and NEVER cause an auto-ban
+// (per telemetry design doc: anti_vm alone is WARN, not CRITICAL — a legit
+// virtualised Windows must not get banned). The 5 anti_vm bits (0..4) are
+// shifted into a dedicated region that does not collide with anti_debug (0..9),
+// anti_hook (0..15), or the CRITICAL high bits above. The server masks this
+// region out of the ban decision; both sides must agree on these constants.
+constexpr uint32_t WARN_ANTIVM_SHIFT = 16;
+constexpr uint32_t WARN_ANTIVM_MASK  = 0x001F0000u; // bits 16..20
 } // namespace bits
 
 namespace detail {
